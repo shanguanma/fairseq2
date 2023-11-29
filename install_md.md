@@ -14,8 +14,6 @@ conda install pytorch==2.0.1  torchaudio==2.0.2 pytorch-cuda=11.7 -c pytorch -c 
 
 ## cuda11.8 pytorch=2.1.1
 conda install pytorch=2.1.1  torchaudio==2.1.1 pytorch-cuda=11.8 -c pytorch -c nvidia -c https://mirrors.bfsu.edu.cn/anaconda/cloud/pytorch/linux-64/ -y
-or
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118  -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 #install fairseq2
 ```
@@ -32,10 +30,10 @@ pip install fairseq2n  --pre --upgrade --extra-index-url https://fair.pkg.atmeta
 #### install fairseq2
 pip install -e .
 #### install ibsndfile
- conda install -c conda-forge libsndfile==1.0.31 
+conda install -c conda-forge libsndfile==1.0.31 
 ```
 
-### prepare fairseq path
+### check fairseq whether is work
 ```
 view python path 
 $  echo $PYTHONPATH
@@ -45,7 +43,14 @@ $  unset PYTHONPATH
 
 add your fairseq2 path
 $  PYTHONPATH=/path/to/fairseq2:$PYTHONPATH
+e.g.PYTHONPATH=/mntnfs/lee_data1/maduo/fairseq2:$PYTHONPATH
+$ echo $PYTHONPATH
+
 $ python
+Python 3.11.5 (main, Sep 11 2023, 13:54:46) [GCC 11.2.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> from fairseq2.data.typing import PathLike
+>>>
 ```
 
 

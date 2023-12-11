@@ -6,7 +6,7 @@
 
 from setuptools import find_packages, setup
 
-version = "0.2.0.dev0"
+version = "0.2.1.dev0"
 
 # If this is a local development install, allow nightly fairseq2n builds to
 # take precedence.
@@ -55,4 +55,7 @@ setup(
         "tqdm~=4.62",
         "typing_extensions~=4.3;python_version<'3.10'",
     ],
+    extras_require={
+        "arrow": ["pyarrow>=13.0.0", "pandas~=2.0.0"],
+    },
 )

@@ -53,10 +53,9 @@ reusing an existing one to avoid dependency conflicts.
 ## 3. Install Dependencies
 
 ### 3.1 System Dependencies
-fairseq2 has a dependency on
-[libsndfile](https://github.com/libsndfile/libsndfile) that can be installed via
-the system package manager on most Linux distributions, or via Homebrew on
-macOS.
+fairseq2 depends on [libsndfile](https://github.com/libsndfile/libsndfile),
+which can be installed via the system package manager on most Linux
+distributions, or via Homebrew on macOS.
 
 For Ubuntu-based systems, run:
 

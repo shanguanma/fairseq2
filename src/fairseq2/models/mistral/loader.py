@@ -4,23 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Mapping
+from typing import Any, Dict
 
-from fairseq2.assets import asset_store, download_manager
+from fairseq2.assets import default_asset_store, default_download_manager
+from fairseq2.data.text import load_basic_sentencepiece_tokenizer, load_text_tokenizer
 from fairseq2.models.mistral.builder import (
     MistralConfig,
     create_mistral_model,
     mistral_archs,
 )
-from fairseq2.models.mistral.tokenizer import MistralTokenizer
 from fairseq2.models.transformer import TransformerDecoderModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader, TokenizerLoader
+from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_model_state_dict
 
 
 def convert_mistral_checkpoint(
-    checkpoint: Mapping[str, Any], config: MistralConfig
-) -> Mapping[str, Any]:
+    checkpoint: Dict[str, Any], config: MistralConfig
+) -> Dict[str, Any]:
     """Convert a reference Mistral checkpoint to fairseq2."""
     key_map = {
         # fmt: off
@@ -44,16 +44,17 @@ def convert_mistral_checkpoint(
     return {"model": checkpoint}
 
 
-load_mistral_config = ConfigLoader[MistralConfig](asset_store, mistral_archs)
+load_mistral_config = ConfigLoader[MistralConfig](default_asset_store, mistral_archs)
 
 load_mistral_model = ModelLoader[TransformerDecoderModel, MistralConfig](
-    asset_store,
-    download_manager,
+    default_asset_store,
+    default_download_manager,
     load_mistral_config,
     create_mistral_model,
     convert_mistral_checkpoint,
+    mmap=True,
 )
 
-load_mistral_tokenizer = TokenizerLoader[MistralTokenizer](
-    asset_store, download_manager, MistralTokenizer
-)
+load_mistral_tokenizer = load_basic_sentencepiece_tokenizer
+
+load_text_tokenizer.register_loader("mistral", load_mistral_tokenizer)

@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Mapping
+from typing import Any, Dict
 
 import torch
 
-from fairseq2.assets import asset_store, download_manager
+from fairseq2.assets import default_asset_store, default_download_manager
 from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_fairseq_checkpoint
 from fairseq2.models.wav2vec2.builder import (
@@ -21,8 +21,8 @@ from fairseq2.nn.transformer import TransformerNormOrder
 
 
 def convert_wav2vec2_checkpoint(
-    checkpoint: Mapping[str, Any], config: Wav2Vec2Config
-) -> Mapping[str, Any]:
+    checkpoint: Dict[str, Any], config: Wav2Vec2Config
+) -> Dict[str, Any]:
     """Convert a fairseq wav2vec 2.0 checkpoint to fairseq2."""
     state_dict = checkpoint["model"]
 
@@ -65,12 +65,13 @@ def convert_wav2vec2_checkpoint(
     return convert_fairseq_checkpoint(checkpoint, key_map)
 
 
-load_wav2vec2_config = ConfigLoader[Wav2Vec2Config](asset_store, wav2vec2_archs)
+load_wav2vec2_config = ConfigLoader[Wav2Vec2Config](default_asset_store, wav2vec2_archs)
 
 load_wav2vec2_model = ModelLoader[Wav2Vec2Model, Wav2Vec2Config](
-    asset_store,
-    download_manager,
+    default_asset_store,
+    default_download_manager,
     load_wav2vec2_config,
     create_wav2vec2_model,
     convert_wav2vec2_checkpoint,
+    mmap=True,
 )

@@ -10,29 +10,29 @@ from typing import Optional
 
 import torch
 
-from fairseq2.assets import asset_store
+from fairseq2.assets import default_asset_store
+from fairseq2.data.text import load_text_tokenizer
 from fairseq2.generation import (
     Chatbot,
     ChatMessage,
     SamplingSequenceGenerator,
     TopPSampler,
+    create_chatbot,
 )
-from fairseq2.generation.utils import StdOutPrintHook
-from fairseq2.models.llama import LLaMAChatbot, load_llama_model, load_llama_tokenizer
+from fairseq2.models.llama import load_llama_model
+from fairseq2.typing import Device
 
 
 def run_llama_chatbot(checkpoint_dir: Optional[Path] = None) -> None:
-    model_card = asset_store.retrieve_card("llama2_7b_chat")
+    model_card = default_asset_store.retrieve_card("llama2_7b_chat")
 
     if checkpoint_dir is not None:
         model_card.field("checkpoint").set(checkpoint_dir / "consolidated.pth")
         model_card.field("tokenizer").set(checkpoint_dir / "tokenizer.model")
 
-    model = load_llama_model(
-        model_card, dtype=torch.float16, device=torch.device("cuda")
-    )
+    model = load_llama_model(model_card, dtype=torch.float16, device=Device("cuda:0"))
 
-    tokenizer = load_llama_tokenizer(model_card)
+    tokenizer = load_text_tokenizer(model_card)
 
     sampler = TopPSampler(p=0.8)
 
@@ -40,7 +40,7 @@ def run_llama_chatbot(checkpoint_dir: Optional[Path] = None) -> None:
         model, sampler, temperature=0.6, max_gen_len=1024
     )
 
-    chatbot = LLaMAChatbot(generator, tokenizer)
+    chatbot = create_chatbot(model_card.asset_type(), generator, tokenizer, stdout=True)
 
     run_chatbot(chatbot)
 
@@ -62,10 +62,7 @@ def run_chatbot(chatbot: Chatbot) -> None:
 
         print("\nLLaMA> ", end="")
 
-        hook = StdOutPrintHook(chatbot.text_decoder)
-
-        with chatbot.generator.register_step_hook(hook):
-            response, _ = chatbot(dialog)
+        response, _ = chatbot(dialog)
 
         print("\n")
 

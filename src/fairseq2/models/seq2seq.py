@@ -6,31 +6,42 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple, final
 
 import torch
 from torch import Tensor
 from torch.nn import Module
+from torcheval.metrics import Mean, Sum, Throughput
 
 from fairseq2.data import VocabularyInfo
+from fairseq2.gang import Gang
+from fairseq2.metrics import MetricBag
 from fairseq2.models.sequence import SequenceModelOutput
 from fairseq2.nn.padding import PaddingMask
+from fairseq2.typing import override
 
 
 class Seq2SeqModel(Module, ABC):
     """Represents a sequence-to-sequence model."""
 
+    max_target_seq_len: int
     target_vocab_info: VocabularyInfo
 
-    def __init__(self, target_vocab_info: VocabularyInfo) -> None:
+    def __init__(
+        self, max_target_seq_len: int, target_vocab_info: VocabularyInfo
+    ) -> None:
         """
+        :param max_target_seq_len:
+            The maximum length of sequences produced by the model.
         :param target_vocab_info:
             The vocabulary information of sequences produced by the model.
         """
         super().__init__()
 
+        self.max_target_seq_len = max_target_seq_len
         self.target_vocab_info = target_vocab_info
 
     @abstractmethod
@@ -41,7 +52,8 @@ class Seq2SeqModel(Module, ABC):
         """
 
 
-@dataclass
+@final
+@dataclass(frozen=True)
 class Seq2SeqBatch:
     """Represents a sequence-to-sequence batch."""
 
@@ -68,21 +80,21 @@ class Seq2SeqBatch:
     example: Any = None
     """The data example from which this batch was constructed."""
 
-    def as_training_input(self) -> Tuple[Seq2SeqBatch, Tensor]:
-        """Return a copy of this batch for model training.
+    def as_input_and_target(self) -> Tuple[Seq2SeqBatch, Tensor]:
+        """Use this batch for model training or validation.
 
         :returns:
-          - The batch with target sequences trimmed one step from the end to use
-            as model input.
-          - The target sequences trimmed one step from the beginning to use as
-            targets in loss computation.
+          - A new batch with the target sequences trimmed one step from the end
+            to use as model input.
+          - The target sequences trimmed one step from the beginning to use in
+            loss computation.
         """
-        if (target_seq_len := self.target_seqs.size(1)) < 2:
+        if (seq_len := self.target_seqs.size(1)) < 2:
             raise ValueError(
-                f"The sequence length of `target_seqs` must be at least 2 for training, but is {target_seq_len} instead."
+                f"The sequence length of `target_seqs` must be at least 2 for training, but is {seq_len} instead."
             )
 
-        target_seqs = self.target_seqs[:, :-1]  # TODO: even padding for fp16?
+        target_seqs = self.target_seqs[:, :-1]
 
         if self.target_padding_mask is None:
             target_padding_mask = None
@@ -97,23 +109,117 @@ class Seq2SeqBatch:
 
     @property
     def batch_size(self) -> int:
-        """The size of the batch."""
+        """The size of the batch dimension."""
         return self.target_seqs.size(0)
 
-    def compute_num_source_tokens(self) -> Tensor:
-        """Compute the number of source tokens in this batch."""
+    def num_source_elements(self) -> int:
+        """Return the number of elements in the source sequences."""
         if self.source_padding_mask is None:
-            return torch.full(
-                (), self.source_seqs.numel(), device=self.source_seqs.device
-            )
+            return self.source_seqs.numel()
 
-        return self.source_padding_mask.seq_lens.sum()
+        return int(self.source_padding_mask.seq_lens.sum())
 
-    def compute_num_target_tokens(self) -> Tensor:
-        """Compute the number of target tokens in this batch."""
+    def num_target_elements(self) -> int:
+        """Return the number of elements in the target sequences."""
         if self.target_padding_mask is None:
-            return torch.full(
-                (), self.target_seqs.numel(), device=self.target_seqs.device
-            )
+            return self.target_seqs.numel()
 
-        return self.target_padding_mask.seq_lens.sum()
+        return int(self.target_padding_mask.seq_lens.sum())
+
+
+@final
+class Seq2SeqModelMetricBag(MetricBag):
+    """Holds the common metrics of a sequence-to-sequence model."""
+
+    loss: Mean
+    entropy_loss: Mean
+    batch_size: Mean
+    elements_per_batch: Mean
+    elements_per_second: Throughput
+    num_examples: Sum
+    num_source_elements: Sum
+    num_target_elements: Sum
+
+    def __init__(self, gang: Gang) -> None:
+        """
+        :param gang:
+            The gang to sync metrics across all processes.
+        """
+        super().__init__(gang)
+
+        d = gang.device
+
+        self.register_metric("loss", Mean(device=d), persistent=False)
+
+        self.register_metric("entropy_loss", Mean(device=d), persistent=False)
+
+        self.register_metric("batch_size", Mean(device=d), persistent=False)
+
+        self.register_metric("elements_per_batch", Mean(device=d), persistent=False)
+
+        self.register_metric("elements_per_second", Throughput(device=d), persistent=False)  # fmt: skip
+
+        self.num_examples = Sum(device=d)
+
+        self.num_source_elements = Sum(device=d)
+        self.num_target_elements = Sum(device=d)
+
+    def update_metrics(
+        self,
+        batches: Sequence[Seq2SeqBatch],
+        losses: Sequence[Tensor],
+        elapsed_time: float,
+    ) -> None:
+        """Update the metrics.
+
+        :param batches:
+            The batches processed by the model in the last training step.
+        :param output:
+            The losses generated by the model for each batch in ``batches``.
+        :param elapsed_time:
+            The total elapsed time to read and process ``batches``.
+        """
+        loss = torch.zeros((), dtype=torch.float64)
+
+        batch_size = torch.zeros((), dtype=torch.float64)
+
+        num_source_elements = torch.zeros((), dtype=torch.float64)
+        num_target_elements = torch.zeros((), dtype=torch.float64)
+
+        for batch, batch_loss in zip(batches, losses):
+            loss += float(batch_loss)
+
+            batch_size += batch.batch_size
+
+            num_source_elements += batch.num_source_elements()
+            num_target_elements += batch.num_target_elements() - batch.batch_size
+
+        loss /= num_target_elements
+
+        self.loss.update(loss, weight=num_target_elements)
+
+        # Mainly exists for compatibility with fairseq's `nll_loss`.
+        self.entropy_loss.update(loss / math.log(2), weight=num_target_elements)
+
+        self.batch_size.update(batch_size * self.gang.size)
+
+        self.elements_per_batch.update(num_target_elements * self.gang.size)
+
+        self.elements_per_second.update(int(num_target_elements), elapsed_time)
+
+        self.num_examples.update(batch_size)
+
+        self.num_source_elements.update(num_source_elements)
+        self.num_target_elements.update(num_target_elements)
+
+    def reset_batch_metrics(self) -> None:
+        """Reset the batch metrics to their initial state."""
+        self.loss.reset()
+        self.entropy_loss.reset()
+        self.batch_size.reset()
+        self.elements_per_batch.reset()
+        self.elements_per_second.reset()
+
+    @override
+    def process_metric_values(self, values: Dict[str, Any]) -> None:
+        values["elapsed_time"] = self.elements_per_second.elapsed_time_sec

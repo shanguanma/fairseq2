@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Sequence, Tuple, Union, final
+from typing import Dict, List, Optional, Protocol, Sequence, Tuple, Union, final
 
 import torch
 from torch import Tensor
@@ -15,10 +15,10 @@ from torch.nn.functional import softmax
 
 from fairseq2.data import VocabularyInfo
 from fairseq2.generation.generator import (
+    AbstractSeq2SeqGenerator,
+    AbstractSequenceGenerator,
     Hypothesis,
-    Seq2SeqGenerator,
     Seq2SeqGeneratorOutput,
-    SequenceGenerator,
     SequenceGeneratorOutput,
     StepHook,
 )
@@ -29,25 +29,27 @@ from fairseq2.models.sequence import SequenceModelOutput
 from fairseq2.nn.incremental_state import IncrementalStateBag
 from fairseq2.nn.ops import repeat_interleave
 from fairseq2.nn.padding import PaddingMask
-from fairseq2.typing import finaloverride, override
+from fairseq2.typing import override
 
 
 @final
-class SamplingSequenceGenerator(SequenceGenerator):
+class SamplingSequenceGenerator(AbstractSequenceGenerator):
     """Represents a sequence generator based on sampling."""
 
-    sampler: Sampler
-    num_gens: int
-    min_gen_len: int
-    max_gen_len: int
-    max_seq_len: int
-    echo_prompt: bool
-    compute_scores: bool
-    normalize_scores: bool
-    temperature: float
-    unk_penalty: float
-    len_penalty: float
-    step_processors: List[StepProcessor]
+    _sampler: Sampler
+    _num_gens: int
+    _min_gen_len: int
+    _max_gen_len: int
+    _max_seq_len: int
+    _echo_prompt: bool
+    _compute_scores: bool
+    _normalize_scores: bool
+    _temperature: float
+    _unk_penalty: float
+    _len_penalty: float
+    _prefill_chunk_size: Optional[int]
+    _decode_capacity_increment: Optional[int]
+    _step_processors: List[StepProcessor]
 
     def __init__(
         self,
@@ -57,13 +59,15 @@ class SamplingSequenceGenerator(SequenceGenerator):
         num_gens: int = 1,
         min_gen_len: int = 1,
         max_gen_len: int = 128,
-        max_seq_len: int = 1024,
+        max_seq_len: Optional[int] = None,
         echo_prompt: bool = False,
         compute_scores: bool = False,
         normalize_scores: bool = True,
         temperature: float = 0.6,
         unk_penalty: float = 0.0,
         len_penalty: float = 1.0,
+        prefill_chunk_size: Optional[int] = 512,
+        decode_capacity_increment: Optional[int] = 16,
         step_processors: Optional[Sequence[StepProcessor]] = None,
     ) -> None:
         """
@@ -94,6 +98,13 @@ class SamplingSequenceGenerator(SequenceGenerator):
         :param len_penalty:
             The length penalty, where values less than 1.0 favor shorter
             sequences; values greater than 1.0 favor longer sequences.
+        :param prefill_chunk_size:
+            The prefill will be performed incrementally by chunks of this size.
+            If ``None``, the entire prefill will be performed at once.
+        :param decode_capacity_increment:
+            The sequence length capacity of state tensors will be incremented by
+            multiples of this value. If ``None``, state tensors will be
+            preallocated with a capacity of ``max_seq_len``.
         :param step_processors:
             The processors to call at each generation step.
         """
@@ -114,44 +125,63 @@ class SamplingSequenceGenerator(SequenceGenerator):
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {min_gen_len} instead."
             )
 
-        self.sampler = sampler
-        self.num_gens = num_gens
-        self.min_gen_len = min_gen_len
-        self.max_gen_len = max_gen_len
-        self.max_seq_len = max_seq_len
-        self.echo_prompt = echo_prompt
-        self.compute_scores = compute_scores
-        self.normalize_scores = normalize_scores
-        self.temperature = temperature
-        self.unk_penalty = unk_penalty
-        self.len_penalty = len_penalty
+        if prefill_chunk_size is not None and prefill_chunk_size < 1:
+            raise ValueError(
+                f"`prefill_chunk_size` must be greater than or equal to 1, but is {prefill_chunk_size} instead."
+            )
+
+        if decode_capacity_increment is not None and decode_capacity_increment < 1:
+            raise ValueError(
+                f"`decode_capacity_increment` must be greater than or equal to 1, but is {decode_capacity_increment} instead."
+            )
+
+        if max_seq_len is None:
+            effective_max_seq_len = model.max_seq_len
+        else:
+            effective_max_seq_len = min(max_seq_len, model.max_seq_len)
+
+        self._sampler = sampler
+        self._num_gens = num_gens
+        self._min_gen_len = min_gen_len
+        self._max_gen_len = max_gen_len
+        self._max_seq_len = effective_max_seq_len
+        self._echo_prompt = echo_prompt
+        self._compute_scores = compute_scores
+        self._normalize_scores = normalize_scores
+        self._temperature = temperature
+        self._unk_penalty = unk_penalty
+        self._len_penalty = len_penalty
+        self._prefill_chunk_size = prefill_chunk_size
+        self._decode_capacity_increment = decode_capacity_increment
 
         if step_processors:
-            self.step_processors = list(step_processors)
+            self._step_processors = list(step_processors)
         else:
-            self.step_processors = []
+            self._step_processors = []
 
-    @finaloverride
     @torch.inference_mode()
+    @override
     def __call__(
         self, prompt_seqs: Tensor, prompt_padding_mask: Optional[PaddingMask]
     ) -> SequenceGeneratorOutput:
         op = _SamplingSequenceGeneratorOp(
-            self.model,
+            self._model,
             prompt_seqs,
             prompt_padding_mask,
-            self.sampler,
-            self.num_gens,
-            self.min_gen_len,
-            self.max_gen_len,
-            self.max_seq_len,
-            self.echo_prompt,
-            self.compute_scores,
-            self.normalize_scores,
-            self.temperature,
-            self.unk_penalty,
-            self.len_penalty,
-            self.step_processors,
+            self._sampler,
+            self._num_gens,
+            self._min_gen_len,
+            self._max_gen_len,
+            self._max_seq_len,
+            self._echo_prompt,
+            self._compute_scores,
+            self._normalize_scores,
+            self._temperature,
+            self._unk_penalty,
+            self._len_penalty,
+            self._prefill_chunk_size,
+            self._decode_capacity_increment,
+            self._step_processors,
             self._step_hooks,
         )
 
@@ -161,21 +191,23 @@ class SamplingSequenceGenerator(SequenceGenerator):
 
 
 @final
-class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
+class SamplingSeq2SeqGenerator(AbstractSeq2SeqGenerator):
     """Represents a sequence-to-sequence generator based on sampling."""
 
-    sampler: Sampler
-    num_gens: int
-    min_gen_len: int
-    max_gen_len: Tuple[int, int]
-    max_seq_len: int
-    echo_prompt: bool
-    compute_scores: bool
-    normalize_scores: bool
-    temperature: float
-    unk_penalty: float
-    len_penalty: float
-    step_processors: List[StepProcessor]
+    _sampler: Sampler
+    _num_gens: int
+    _min_gen_len: int
+    _max_gen_len: Tuple[int, int]
+    _max_seq_len: int
+    _echo_prompt: bool
+    _compute_scores: bool
+    _normalize_scores: bool
+    _temperature: float
+    _unk_penalty: float
+    _len_penalty: float
+    _prefill_chunk_size: Optional[int]
+    _decode_capacity_increment: Optional[int]
+    _step_processors: List[StepProcessor]
 
     def __init__(
         self,
@@ -185,13 +217,15 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         num_gens: int = 1,
         min_gen_len: int = 1,
         max_gen_len: Tuple[int, int] = (1, 128),
-        max_seq_len: int = 1024,
+        max_seq_len: Optional[int] = None,
         echo_prompt: bool = False,
         compute_scores: bool = False,
         normalize_scores: bool = True,
         temperature: float = 0.6,
         unk_penalty: float = 0.0,
         len_penalty: float = 1.0,
+        prefill_chunk_size: Optional[int] = 512,
+        decode_capacity_increment: Optional[int] = 16,
         step_processors: Optional[Sequence[StepProcessor]] = None,
     ) -> None:
         """
@@ -223,6 +257,13 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         :param len_penalty:
             The length penalty, where values less than 1.0 favor shorter
             sequences; values greater than 1.0 favor longer sequences.
+        :param prefill_chunk_size:
+            The prefill will be performed incrementally by chunks of this size.
+            If ``None``, the entire prefill will be performed at once.
+        :param decode_capacity_increment:
+            The sequence length capacity of state tensors will be incremented by
+            multiples of this value. If ``None``, state tensors will be
+            preallocated with a capacity of ``max_seq_len``.
         :param step_processors:
             The processors to call at each generation step.
         """
@@ -233,25 +274,42 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
                 f"`min_gen_len` must be greater than or equal to 1, but is {min_gen_len} instead."
             )
 
-        self.sampler = sampler
-        self.num_gens = num_gens
-        self.min_gen_len = min_gen_len
-        self.max_gen_len = max_gen_len
-        self.max_seq_len = max_seq_len
-        self.echo_prompt = echo_prompt
-        self.compute_scores = compute_scores
-        self.normalize_scores = normalize_scores
-        self.temperature = temperature
-        self.unk_penalty = unk_penalty
-        self.len_penalty = len_penalty
+        if prefill_chunk_size is not None and prefill_chunk_size < 1:
+            raise ValueError(
+                f"`prefill_chunk_size` must be greater than or equal to 1, but is {prefill_chunk_size} instead."
+            )
+
+        if decode_capacity_increment is not None and decode_capacity_increment < 1:
+            raise ValueError(
+                f"`decode_capacity_increment` must be greater than or equal to 1, but is {decode_capacity_increment} instead."
+            )
+
+        if max_seq_len is None:
+            effective_max_seq_len = model.max_target_seq_len
+        else:
+            effective_max_seq_len = min(max_seq_len, model.max_target_seq_len)
+
+        self._sampler = sampler
+        self._num_gens = num_gens
+        self._min_gen_len = min_gen_len
+        self._max_gen_len = max_gen_len
+        self._max_seq_len = effective_max_seq_len
+        self._echo_prompt = echo_prompt
+        self._compute_scores = compute_scores
+        self._normalize_scores = normalize_scores
+        self._temperature = temperature
+        self._unk_penalty = unk_penalty
+        self._len_penalty = len_penalty
+        self._prefill_chunk_size = prefill_chunk_size
+        self._decode_capacity_increment = decode_capacity_increment
 
         if step_processors:
-            self.step_processors = list(step_processors)
+            self._step_processors = list(step_processors)
         else:
-            self.step_processors = []
+            self._step_processors = []
 
-    @finaloverride
     @torch.inference_mode()
+    @override
     def __call__(
         self,
         source_seqs: Tensor,
@@ -269,7 +327,7 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         else:
             max_source_len = int(source_padding_mask.seq_lens.max())
 
-        a_term, b_term = self.max_gen_len
+        a_term, b_term = self._max_gen_len
 
         # In seq2seq generation, the maximum generation length is relative to
         # the source sequence length.
@@ -280,29 +338,31 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
                 f"`max_gen_len` must be greater than or equal to 1, but is {max_gen_len} instead. Adjust your `max_gen_len` argument."
             )
 
-        if self.min_gen_len > max_gen_len:
+        if self._min_gen_len > max_gen_len:
             raise ValueError(
-                f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
+                f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self._min_gen_len} instead. Adjust your `max_gen_len` argument."
             )
 
         op = _SamplingSeq2SeqGeneratorOp(
-            self.model,
+            self._model,
             encoder_output,
             encoder_padding_mask,
             prompt_seqs,
             prompt_padding_mask,
-            self.sampler,
-            self.num_gens,
-            self.min_gen_len,
+            self._sampler,
+            self._num_gens,
+            self._min_gen_len,
             max_gen_len,
-            self.max_seq_len,
-            self.echo_prompt,
-            self.compute_scores,
-            self.normalize_scores,
-            self.temperature,
-            self.unk_penalty,
-            self.len_penalty,
-            self.step_processors,
+            self._max_seq_len,
+            self._echo_prompt,
+            self._compute_scores,
+            self._normalize_scores,
+            self._temperature,
+            self._unk_penalty,
+            self._len_penalty,
+            self._prefill_chunk_size,
+            self._decode_capacity_increment,
+            self._step_processors,
             self._step_hooks,
         )
 
@@ -311,10 +371,9 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask)
 
 
-class Sampler(ABC):
+class Sampler(Protocol):
     """Represents a sampling algorithm."""
 
-    @abstractmethod
     def __call__(self, probs: Tensor) -> Tensor:
         """
         :param probs:
@@ -333,16 +392,15 @@ class TopPSampler(Sampler):
     :cite:t:`https://doi.org/10.48550/arxiv.1904.09751`.
     """
 
-    p: float
+    _p: float
 
     def __init__(self, p: float = 0.9) -> None:
         """
         :param p:
             The cumulative probability threshold.
         """
-        self.p = p
+        self._p = p
 
-    @finaloverride
     def __call__(self, probs: Tensor) -> Tensor:
         # Previous operations in the generation like step processors might have
         # modified the probabilities. Normalize the distribution.
@@ -353,7 +411,7 @@ class TopPSampler(Sampler):
         # (N, V)
         cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
 
-        mask = (cumsum_probs - sorted_probs) > self.p
+        mask = (cumsum_probs - sorted_probs) > self._p
 
         sorted_probs[mask] = 0.0
 
@@ -373,18 +431,17 @@ class TopPSampler(Sampler):
 class TopKSampler(Sampler):
     """Selects the next step randomly from the k mosty likely candidates."""
 
-    k: int
+    _k: int
 
     def __init__(self, k: int) -> None:
         """
         :param k:
             The number of candidates to select from.
         """
-        self.k = k
+        self._k = k
 
-    @finaloverride
     def __call__(self, probs: Tensor) -> Tensor:
-        k = min(self.k, probs.size(1))
+        k = min(self._k, probs.size(1))
 
         if k == 1:
             # (N, 1)
@@ -405,32 +462,33 @@ class TopKSampler(Sampler):
         return indices.squeeze(-1)
 
 
-class _SamplingSequenceGeneratorOpBase(ABC):
-    sampler: Sampler
-    eos_idx: int
-    pad_idx: Optional[int]
-    unk_idx: Optional[int]
-    num_gens: int
-    min_prompt_len: int
-    max_prompt_len: int
-    min_seq_len: int
-    max_seq_len: int
-    echo_prompt: bool
-    compute_scores: bool
-    normalize_scores: bool
-    temperature: float
-    unk_penalty: float
-    len_penalty: float
-    step_processors: Sequence[StepProcessor]
-    step_nr: int
-    state_bag: IncrementalStateBag
-    prompt_lens: Optional[Tensor]
-    prompt_mask: Optional[Tensor]
-    prompt_indices: Tensor
-    seqs: Tensor
-    step_scores: Optional[Tensor]
-    output: List[List[Hypothesis]]
-    step_hooks: Dict[int, StepHook]
+class _AbstractSamplingSequenceGeneratorOp(ABC):
+    _sampler: Sampler
+    _eos_idx: int
+    _pad_idx: Optional[int]
+    _unk_idx: Optional[int]
+    _num_gens: int
+    _min_prompt_len: int
+    _max_prompt_len: int
+    _min_seq_len: int
+    _max_seq_len: int
+    _echo_prompt: bool
+    _compute_scores: bool
+    _normalize_scores: bool
+    _temperature: float
+    _unk_penalty: float
+    _len_penalty: float
+    _prefill_chunk_size: Optional[int]
+    _step_processors: List[StepProcessor]
+    _step_hooks: Dict[int, StepHook]
+    _step_nr: int
+    _state_bag: IncrementalStateBag
+    _prompt_lens: Optional[Tensor]
+    _prompt_mask: Optional[Tensor]
+    _prompt_indices: Tensor
+    _seqs: Tensor
+    _step_scores: Optional[Tensor]
+    _output: List[List[Hypothesis]]
 
     def __init__(
         self,
@@ -448,70 +506,75 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        step_processors: Sequence[StepProcessor],
+        prefill_chunk_size: Optional[int],
+        decode_capacity_increment: Optional[int],
+        step_processors: List[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
-        self.sampler = sampler
+        self._sampler = sampler
 
         assert vocab_info.eos_idx is not None
 
-        self.eos_idx = vocab_info.eos_idx
-        self.pad_idx = vocab_info.pad_idx
-        self.unk_idx = vocab_info.unk_idx
+        self._eos_idx = vocab_info.eos_idx
+        self._pad_idx = vocab_info.pad_idx
+        self._unk_idx = vocab_info.unk_idx
 
-        self.num_gens = num_gens
+        self._num_gens = num_gens
 
         min_prompt_idx: Union[int, Tensor]
         max_prompt_idx: Union[int, Tensor]
 
         if prompt_padding_mask is None:
-            self.min_prompt_len, min_prompt_idx = prompt_seqs.size(1), 0
-            self.max_prompt_len, max_prompt_idx = prompt_seqs.size(1), 0
+            self._min_prompt_len, min_prompt_idx = prompt_seqs.size(1), 0
+            self._max_prompt_len, max_prompt_idx = prompt_seqs.size(1), 0
         else:
             prompt_seq_lens = prompt_padding_mask.seq_lens
 
             min_prompt_len, min_prompt_idx = torch.min(prompt_seq_lens, dim=0)
             max_prompt_len, max_prompt_idx = torch.max(prompt_seq_lens, dim=0)
 
-            self.min_prompt_len = int(min_prompt_len)
-            self.max_prompt_len = int(max_prompt_len)
+            self._min_prompt_len = int(min_prompt_len)
+            self._max_prompt_len = int(max_prompt_len)
 
-            if self.min_prompt_len == self.max_prompt_len:
+            if self._min_prompt_len == self._max_prompt_len:
                 prompt_padding_mask = None
 
-        if self.min_prompt_len < 1:
+        if self._min_prompt_len < 1:
             raise ValueError(f"`prompt_seqs[{int(min_prompt_idx)}]` must not be empty.")
 
-        if self.max_prompt_len >= max_seq_len:
+        if self._max_prompt_len >= max_seq_len:
             raise ValueError(
-                f"The length of `prompt_seqs[{int(max_prompt_idx)}]` must be less than `max_seq_len` ({max_seq_len}), but is {self.max_prompt_len} instead."
+                f"The length of `prompt_seqs[{int(max_prompt_idx)}]` must be less than `max_seq_len` ({max_seq_len}), but is {self._max_prompt_len} instead."
             )
 
-        self.min_seq_len = min(max_seq_len, self.max_prompt_len + min_gen_len)
-        self.max_seq_len = min(max_seq_len, self.max_prompt_len + max_gen_len)
+        self._min_seq_len = min(max_seq_len, self._max_prompt_len + min_gen_len)
+        self._max_seq_len = min(max_seq_len, self._max_prompt_len + max_gen_len)
 
-        self.echo_prompt = echo_prompt
-        self.compute_scores = compute_scores
-        self.normalize_scores = normalize_scores
-        self.temperature = temperature
-        self.unk_penalty = unk_penalty
-        self.len_penalty = len_penalty
-        self.step_processors = step_processors
-        self.step_hooks = step_hooks
+        self._echo_prompt = echo_prompt
+        self._compute_scores = compute_scores
+        self._normalize_scores = normalize_scores
+        self._temperature = temperature
+        self._unk_penalty = unk_penalty
+        self._len_penalty = len_penalty
+        self._prefill_chunk_size = prefill_chunk_size
+        self._step_processors = step_processors
+        self._step_hooks = step_hooks
 
-        self.step_nr = 0
+        self._step_nr = 0
 
-        self.state_bag = IncrementalStateBag(self.max_seq_len)
+        self._state_bag = IncrementalStateBag(
+            self._max_seq_len, capacity_increment=decode_capacity_increment
+        )
 
         if prompt_padding_mask is None:
-            self.prompt_lens = None
-            self.prompt_mask = None
+            self._prompt_lens = None
+            self._prompt_mask = None
         else:
             # (P)
-            self.prompt_lens = prompt_padding_mask.seq_lens
+            self._prompt_lens = prompt_padding_mask.seq_lens
 
             # (P, S_prm)
-            self.prompt_mask = prompt_padding_mask.materialize()
+            self._prompt_mask = prompt_padding_mask.materialize()
 
         device = prompt_seqs.device
 
@@ -519,107 +582,127 @@ class _SamplingSequenceGeneratorOpBase(ABC):
 
         # Holds the prompt indices of the generated sequences.
         # (P)
-        self.prompt_indices = torch.arange(num_prompts, device=device)
+        self._prompt_indices = torch.arange(num_prompts, device=device)
 
         # Holds the generated sequences.
         # (P, S)
-        self.seqs = torch.empty(
-            (num_prompts, self.max_seq_len), device=device, dtype=torch.int64
+        self._seqs = torch.empty(
+            (num_prompts, self._max_seq_len), device=device, dtype=torch.int64
         )
 
-        if self.compute_scores:
+        if self._compute_scores:
             # Holds the step scores of the generated sequences.
             # (P, S)
-            self.step_scores = torch.zeros(
-                (num_prompts, self.max_seq_len), device=device, dtype=torch.float32
+            self._step_scores = torch.zeros(
+                (num_prompts, self._max_seq_len), device=device, dtype=torch.float32
             )
         else:
-            self.step_scores = None
+            self._step_scores = None
 
         # Bootstrap the sequences.
-        self.seqs[:, : self.max_prompt_len] = prompt_seqs[:, : self.max_prompt_len]
+        self._seqs[:, : self._max_prompt_len] = prompt_seqs[:, : self._max_prompt_len]
 
         # Holds the sequences that have reached EOS.
-        self.output = [[] for _ in range(num_prompts)]
+        self._output = [[] for _ in range(num_prompts)]
 
     def __call__(self) -> List[List[Hypothesis]]:
         self._prepare_state()
 
-        for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
+        for self._step_nr in range(self._min_prompt_len, self._max_seq_len):
             if not self._step():
                 break
 
-        if self.compute_scores:
+        if self._compute_scores:
             # Sort the hypotheses by their scores before returning.
-            for hypotheses in self.output:
+            for hypotheses in self._output:
                 hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
-        return self.output
+        return self._output
 
     def _prepare_state(self) -> None:
         # Fast-forward to the first step that needs to be generated.
-        if self.min_prompt_len > 1:
+        if self._min_prompt_len > 1:
             self._prefill()
 
         # Fan out the state to `num_prompts` x `num_gens`.
-        if self.num_gens > 1:
-            num_prompts = self.seqs.size(0)
+        if self._num_gens > 1:
+            num_prompts = self._seqs.size(0)
 
             # (P)
-            fan_out = torch.arange(num_prompts, device=self.seqs.device)
+            fan_out = torch.arange(num_prompts, device=self._seqs.device)
 
             # (P) -> (P x G)
-            fan_out = repeat_interleave(fan_out, dim=0, repeat=self.num_gens)
+            fan_out = repeat_interleave(fan_out, dim=0, repeat=self._num_gens)
 
             self._reorder_state(fan_out)
 
     def _prefill(self) -> None:
-        prefill_len = self.min_prompt_len
+        chunk_begin = 0
 
-        model_output = self._decode(self.seqs[:, : prefill_len - 1])
+        prefill_len = self._min_prompt_len
 
-        self.state_bag.increment_step_nr(prefill_len - 1)
+        while chunk_begin < prefill_len - 1:
+            chunk_size = prefill_len - chunk_begin - 1
 
-        if self.step_scores is not None:
+            # Decode by chunks of `prefill_chunk_size`.
+            if self._prefill_chunk_size and chunk_size > self._prefill_chunk_size:
+                chunk_size = self._prefill_chunk_size
+
+            chunk_end = chunk_begin + chunk_size
+
+            model_output = self._decode(self._seqs[:, chunk_begin:chunk_end])
+
+            self._state_bag.increment_step_nr(chunk_size)
+
             logits = model_output.logits
 
-            if self.temperature != 1.0:
-                logits /= self.temperature
+            if self._temperature != 1.0:
+                logits /= self._temperature
 
             # (P, S_prm - 1, V)
             probs = softmax(logits, dim=-1, dtype=torch.float32)
 
-            # Fetch the scores of the next prompt step.
-            # (P, S_prm - 1, 1)
-            prompt_scores = torch.gather(
-                probs, dim=-1, index=self.seqs[:, 1:prefill_len].unsqueeze(-1)
-            )
+            if probs.isnan().any():
+                raise RuntimeError(
+                    "The model has produced one or more NaN probabilities during prefill. The sequence generator cannot continue."
+                )
 
-            # Bootstrap the step scores.
-            # (P, S_prm - 1)
-            self.step_scores[:, 1:prefill_len] = prompt_scores.squeeze(-1)
+            if self._step_scores is not None:
+                s = slice(chunk_begin + 1, chunk_end + 1)
 
-        if self.step_hooks:
-            seqs = self.seqs[:, :prefill_len]
+                # Fetch the scores of the next prompt step.
+                # (P, S_prm - 1, 1)
+                prompt_scores = torch.gather(
+                    probs, dim=-1, index=self._seqs[:, s].unsqueeze(-1)
+                )
 
-            if self.step_scores is None:
+                # Bootstrap the step scores.
+                # (P, S_prm - 1)
+                self._step_scores[:, s] = prompt_scores.squeeze(-1)
+
+            chunk_begin += chunk_size
+
+        if self._step_hooks:
+            seqs = self._seqs[:, :prefill_len]
+
+            if self._step_scores is None:
                 step_scores = None
             else:
-                step_scores = self.step_scores[:, :prefill_len]
+                step_scores = self._step_scores[:, :prefill_len]
 
-            for hook in self.step_hooks.values():
-                hook(self.prompt_indices, seqs, step_scores, prefill=True)
+            for hook in self._step_hooks.values():
+                hook(self._prompt_indices, seqs, step_scores, prefill=True)
 
     def _step(self) -> bool:
         # Generate the next step output.
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
+        model_output = self._decode(self._seqs[:, self._step_nr - 1 : self._step_nr])
 
-        self.state_bag.increment_step_nr()
+        self._state_bag.increment_step_nr()
 
         logits = model_output.logits
 
-        if self.temperature != 1.0:
-            logits /= self.temperature
+        if self._temperature != 1.0:
+            logits /= self._temperature
 
         # (N, 1, V)
         probs = softmax(logits, dim=-1, dtype=torch.float32)
@@ -627,72 +710,77 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         # (N, 1, V) -> (N, V)
         probs.squeeze_(1)
 
+        if probs.isnan().any():
+            raise RuntimeError(
+                f"The model has produced one or more NaN probabilities at step {self._step_nr}. The sequence generator cannot continue."
+            )
+
         # If we are generating the last possible step, force it to be EOS
         # regardless of its score.
-        if self.step_nr == self.max_seq_len - 1:
-            batch_size = self.seqs.size(0)
+        if self._step_nr == self._max_seq_len - 1:
+            batch_size = self._seqs.size(0)
 
             # (N)
-            vocab_indices = self.seqs.new_full((batch_size,), self.eos_idx)
+            vocab_indices = self._seqs.new_full((batch_size,), self._eos_idx)
         else:
             # Process `probs` in-place if requested.
-            for processor in self.step_processors:
-                processor(self.seqs[:, : self.step_nr], probs)
+            for processor in self._step_processors:
+                processor(self._seqs[:, : self._step_nr], probs)
 
             # Apply UNK penalty.
-            if self.unk_idx is not None:
-                probs[:, self.unk_idx] -= self.unk_penalty
+            if self._unk_idx is not None:
+                probs[:, self._unk_idx] -= self._unk_penalty
 
             # Never allow PAD.
-            if self.pad_idx is not None:
-                probs[:, self.pad_idx] = 0
+            if self._pad_idx is not None:
+                probs[:, self._pad_idx] = 0
 
             # Do not allow EOS till we reach the minimum sequence length.
-            if self.step_nr < self.min_seq_len - 1:
-                probs[:, self.eos_idx] = 0
+            if self._step_nr < self._min_seq_len - 1:
+                probs[:, self._eos_idx] = 0
 
             # (N)
-            vocab_indices = self.sampler(probs)
+            vocab_indices = self._sampler(probs)
 
         # EOS mask of the current step.
         # (N)
-        eos_mask = vocab_indices == self.eos_idx
+        eos_mask = vocab_indices == self._eos_idx
 
         # Ignore the generated indices for the prompt sequences.
-        if self.step_nr < self.max_prompt_len:
-            assert self.prompt_mask is not None
+        if self._step_nr < self._max_prompt_len:
+            assert self._prompt_mask is not None
 
             # (N)
-            mask = self.prompt_mask[:, self.step_nr]
+            mask = self._prompt_mask[:, self._step_nr]
 
             # Override the generated indices.
-            vocab_indices[mask] = self.seqs[mask, self.step_nr]
+            vocab_indices[mask] = self._seqs[mask, self._step_nr]
 
             # Ignore EOS in the prompt sequences.
             eos_mask[mask] = False
         else:
-            self.prompt_mask = None  # Not needed anymore, release.
+            self._prompt_mask = None  # Not needed anymore, release.
 
         # Record the current step.
-        self.seqs[:, self.step_nr] = vocab_indices
+        self._seqs[:, self._step_nr] = vocab_indices
 
-        if self.step_scores is not None:
+        if self._step_scores is not None:
             # (N, 1)
             scores = torch.gather(probs, dim=-1, index=vocab_indices[:, None])
 
             # Record the scores of the current step.
-            self.step_scores[:, self.step_nr] = scores.squeeze(1)
+            self._step_scores[:, self._step_nr] = scores.squeeze(1)
 
-        if self.step_hooks:
-            seqs = self.seqs[:, : self.step_nr + 1]
+        if self._step_hooks:
+            seqs = self._seqs[:, : self._step_nr + 1]
 
-            if self.step_scores is None:
+            if self._step_scores is None:
                 step_scores = None
             else:
-                step_scores = self.step_scores[:, : self.step_nr + 1]
+                step_scores = self._step_scores[:, : self._step_nr + 1]
 
-            for hook in self.step_hooks.values():
-                hook(self.prompt_indices, seqs, step_scores, prefill=False)
+            for hook in self._step_hooks.values():
+                hook(self._prompt_indices, seqs, step_scores, prefill=False)
 
         # Retrieve the indices of the sequences that have reached EOS.
         # (F, 1)
@@ -726,32 +814,32 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         ...
 
     def _finish_sequence(self, seq_idx: int) -> None:
-        if self.echo_prompt:
+        if self._echo_prompt:
             start_step = 0
         else:
-            if self.prompt_lens is None:
-                start_step = self.max_prompt_len
+            if self._prompt_lens is None:
+                start_step = self._max_prompt_len
             else:
-                start_step = int(self.prompt_lens[seq_idx])
+                start_step = int(self._prompt_lens[seq_idx])
 
-        seq_len = self.step_nr + 1
+        seq_len = self._step_nr + 1
 
         # (S_out)
-        seq = self.seqs[seq_idx, start_step:seq_len]
+        seq = self._seqs[seq_idx, start_step:seq_len]
 
         # Do not keep `seqs` in memory.
         seq = seq.clone()
 
-        if self.step_scores is not None:
+        if self._step_scores is not None:
             # (S)
-            step_scores = self.step_scores[seq_idx, :seq_len]
+            step_scores = self._step_scores[seq_idx, :seq_len]
 
             score = step_scores.sum()
 
-            if self.normalize_scores:
+            if self._normalize_scores:
                 # Since the first step's score is always 0, do not include it in
                 # the normalization.
-                score /= (seq_len - 1) ** self.len_penalty
+                score /= (seq_len - 1) ** self._len_penalty
 
             # (S_out)
             step_scores = step_scores[start_step:]
@@ -763,34 +851,35 @@ class _SamplingSequenceGeneratorOpBase(ABC):
 
             step_scores = None
 
-        prompt_idx = int(self.prompt_indices[seq_idx])
+        prompt_idx = int(self._prompt_indices[seq_idx])
 
-        self.output[prompt_idx].append(Hypothesis(seq, score, step_scores))
+        self._output[prompt_idx].append(Hypothesis(seq, score, step_scores))
 
     def _reorder_state(self, new_order: Tensor) -> None:
-        self.state_bag.reorder(new_order)
+        self._state_bag.reorder(new_order)
 
         # (N) -> (N - F)
-        if self.prompt_lens is not None:
-            self.prompt_lens = self.prompt_lens.index_select(dim=0, index=new_order)
+        if self._prompt_lens is not None:
+            self._prompt_lens = self._prompt_lens.index_select(dim=0, index=new_order)
 
         # (N, S_prm) -> (N - F, S_prm)
-        if self.prompt_mask is not None:
-            self.prompt_mask = self.prompt_mask.index_select(dim=0, index=new_order)
+        if self._prompt_mask is not None:
+            self._prompt_mask = self._prompt_mask.index_select(dim=0, index=new_order)
 
         # (N) -> (N - F)
-        self.prompt_indices = self.prompt_indices.index_select(dim=0, index=new_order)
+        self._prompt_indices = self._prompt_indices.index_select(dim=0, index=new_order)
 
         # (N, S) -> (N - F, S)
-        self.seqs = self.seqs.index_select(dim=0, index=new_order)
+        self._seqs = self._seqs.index_select(dim=0, index=new_order)
 
         # (N, S) -> (N - F, S)
-        if self.step_scores is not None:
-            self.step_scores = self.step_scores.index_select(dim=0, index=new_order)
+        if self._step_scores is not None:
+            self._step_scores = self._step_scores.index_select(dim=0, index=new_order)
 
 
-class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
-    model: DecoderModel
+@final
+class _SamplingSequenceGeneratorOp(_AbstractSamplingSequenceGeneratorOp):
+    _model: DecoderModel
 
     def __init__(
         self,
@@ -808,7 +897,9 @@ class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        step_processors: Sequence[StepProcessor],
+        prefill_chunk_size: Optional[int],
+        decode_capacity_increment: Optional[int],
+        step_processors: List[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
         super().__init__(
@@ -826,27 +917,30 @@ class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
             temperature,
             unk_penalty,
             len_penalty,
+            prefill_chunk_size,
+            decode_capacity_increment,
             step_processors,
             step_hooks,
         )
 
-        self.model = model
+        self._model = model
 
     @override
     def _decode(self, seqs: Tensor) -> SequenceModelOutput:
-        decoder_output, decoder_padding_mask = self.model.decode(
+        decoder_output, decoder_padding_mask = self._model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
-            state_bag=self.state_bag,
+            state_bag=self._state_bag,
         )
 
-        return self.model.project(decoder_output, decoder_padding_mask)
+        return self._model.project(decoder_output, decoder_padding_mask)
 
 
-class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
-    model: EncoderDecoderModel
-    encoder_output: Tensor
-    encoder_padding_mask: Optional[PaddingMask]
+@final
+class _SamplingSeq2SeqGeneratorOp(_AbstractSamplingSequenceGeneratorOp):
+    _model: EncoderDecoderModel
+    _encoder_output: Tensor
+    _encoder_padding_mask: Optional[PaddingMask]
 
     def __init__(
         self,
@@ -866,7 +960,9 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        step_processors: Sequence[StepProcessor],
+        prefill_chunk_size: Optional[int],
+        decode_capacity_increment: Optional[int],
+        step_processors: List[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
         super().__init__(
@@ -884,38 +980,40 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
             temperature,
             unk_penalty,
             len_penalty,
+            prefill_chunk_size,
+            decode_capacity_increment,
             step_processors,
             step_hooks,
         )
 
-        self.model = model
-        self.encoder_output = encoder_output
-        self.encoder_padding_mask = encoder_padding_mask
+        self._model = model
+        self._encoder_output = encoder_output
+        self._encoder_padding_mask = encoder_padding_mask
 
     @override
     def _decode(self, seqs: Tensor) -> SequenceModelOutput:
-        decoder_output, decoder_padding_mask = self.model.decode(
+        decoder_output, decoder_padding_mask = self._model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
-            self.encoder_output,
-            self.encoder_padding_mask,
-            state_bag=self.state_bag,
+            self._encoder_output,
+            self._encoder_padding_mask,
+            state_bag=self._state_bag,
         )
 
-        return self.model.project(decoder_output, decoder_padding_mask)
+        return self._model.project(decoder_output, decoder_padding_mask)
 
     @override
     def _reorder_state(self, new_order: Tensor) -> None:
         super()._reorder_state(new_order)
 
-        self.encoder_output = self.encoder_output.index_select(dim=0, index=new_order)
+        self._encoder_output = self._encoder_output.index_select(dim=0, index=new_order)
 
-        if self.encoder_padding_mask is not None:
-            encoder_seq_lens = self.encoder_padding_mask.seq_lens
+        if self._encoder_padding_mask is not None:
+            encoder_seq_lens = self._encoder_padding_mask.seq_lens
 
             # (N) -> (N - F)
             encoder_seq_lens = encoder_seq_lens.index_select(dim=0, index=new_order)
 
-            self.encoder_padding_mask = PaddingMask(
-                encoder_seq_lens, batch_seq_len=self.encoder_output.size(1)
+            self._encoder_padding_mask = PaddingMask(
+                encoder_seq_lens, batch_seq_len=self._encoder_output.size(1)
             )

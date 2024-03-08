@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -18,7 +17,8 @@ from fairseq2.assets.metadata_provider import (
     AssetNotFoundError,
     FileAssetMetadataProvider,
 )
-from fairseq2.typing import finaloverride
+from fairseq2.assets.utils import _get_path_from_env
+from fairseq2.typing import override
 
 
 class AssetStore(ABC):
@@ -34,8 +34,8 @@ class AssetStore(ABC):
 
 
 @final
-class ProviderBackedAssetStore(AssetStore):
-    """Represents a store of assets backed by metadata providers."""
+class StandardAssetStore(AssetStore):
+    """Represents a store of assets."""
 
     env_resolvers: List[EnvironmentResolver]
     metadata_providers: List[AssetMetadataProvider]
@@ -50,7 +50,7 @@ class ProviderBackedAssetStore(AssetStore):
         self.metadata_providers = [metadata_provider]
         self.user_metadata_providers = []
 
-    @finaloverride
+    @override
     def retrieve_card(self, name: str) -> AssetCard:
         if "@" in name:
             raise ValueError("`name` must not contain the reserved '@' character.")
@@ -130,6 +130,10 @@ class ProviderBackedAssetStore(AssetStore):
         for provider in self.user_metadata_providers:
             provider.clear_cache()
 
+    def add_file_metadata_provider(self, path: Path) -> None:
+        """Add a new :class:`FileAssetMetadataProvider` pointing to ``path``."""
+        self.metadata_providers.append(FileAssetMetadataProvider(path))
+
 
 class EnvironmentResolver(Protocol):
     """Resolves the environment within which assets should be loaded.
@@ -142,51 +146,25 @@ class EnvironmentResolver(Protocol):
         ...
 
 
-def _create_asset_store() -> ProviderBackedAssetStore:
+def _create_default_asset_store() -> StandardAssetStore:
     cards_dir = Path(__file__).parent.joinpath("cards")
 
     metadata_provider = FileAssetMetadataProvider(cards_dir)
 
-    return ProviderBackedAssetStore(metadata_provider)
+    return StandardAssetStore(metadata_provider)
 
 
-asset_store = _create_asset_store()
-
-
-def _get_path_from_env(var_name: str) -> Optional[Path]:
-    pathname = os.getenv(var_name)
-    if not pathname:
-        return None
-
-    try:
-        path = Path(pathname)
-    except ValueError as ex:
-        raise RuntimeError(
-            f"`{var_name}` environment variable must contain a valid pathname, but contains '{pathname}' instead."
-        ) from ex
-
-    if not path.exists():
-        logger = logging.getLogger("fairseq2.assets")
-
-        logger.warning(
-            f"The path '{path}' pointed to by the `{var_name}` environment variable does not exist."
-        )
-
-        return None
-
-    return path
+default_asset_store = _create_default_asset_store()
 
 
 def _load_asset_directory() -> None:
     asset_dir = _get_path_from_env("FAIRSEQ2_ASSET_DIR")
     if asset_dir is None:
-        asset_dir = Path("/etc/fairseq2/assets")
+        asset_dir = Path("/etc/fairseq2/assets").resolve()
         if not asset_dir.exists():
             return
 
-    asset_dir = asset_dir.expanduser().resolve()
-
-    asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
+    default_asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
 
 
 _load_asset_directory()
@@ -197,15 +175,15 @@ def _load_user_asset_directory() -> None:
     if asset_dir is None:
         asset_dir = _get_path_from_env("XDG_CONFIG_HOME")
         if asset_dir is None:
-            asset_dir = Path("~/.config")
+            asset_dir = Path("~/.config").expanduser()
 
-        asset_dir = asset_dir.expanduser().resolve().joinpath("fairseq2/assets")
+        asset_dir = asset_dir.joinpath("fairseq2/assets").resolve()
         if not asset_dir.exists():
             return
-    else:
-        asset_dir = asset_dir.expanduser().resolve()
 
-    asset_store.user_metadata_providers.append(FileAssetMetadataProvider(asset_dir))
+    default_asset_store.user_metadata_providers.append(
+        FileAssetMetadataProvider(asset_dir)
+    )
 
 
 _load_user_asset_directory()
@@ -216,12 +194,14 @@ def _load_faircluster() -> None:
     if "FAIR_ENV_CLUSTER" not in os.environ:
         return
 
-    asset_store.env_resolvers.append(lambda: "faircluster")
+    default_asset_store.env_resolvers.append(lambda: "faircluster")
 
     # This directory is meant to store cluster-wide asset cards.
     asset_dir = Path("/checkpoint/balioglu/fairseq2-ext/cards")
     if asset_dir.exists():
-        asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
+        default_asset_store.metadata_providers.append(
+            FileAssetMetadataProvider(asset_dir)
+        )
 
 
 _load_faircluster()

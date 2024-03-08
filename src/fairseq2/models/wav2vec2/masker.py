@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, final
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from fairseq2.nn.utils.mask import compute_row_mask
 from fairseq2.typing import DataType, Device
 
 
+@final
 class Wav2Vec2Masker(Module):
     """Masks extracted features as described in Section 3.1 of
     :cite:t:`https://doi.org/10.48550/arxiv.2006.11477`."""
@@ -31,8 +32,10 @@ class Wav2Vec2Masker(Module):
         model_dim: int,
         temporal_span_len: int = 10,
         max_temporal_mask_prob: float = 0.65,
+        min_num_temporal_mask_spans: int = 2,
         spatial_span_len: int = 10,
         max_spatial_mask_prob: float = 0.0,
+        min_num_spatial_mask_spans: int = 2,
         *,
         device: Optional[Device] = None,
         dtype: Optional[DataType] = None,
@@ -59,6 +62,7 @@ class Wav2Vec2Masker(Module):
 
         self.temporal_span_len = temporal_span_len
         self.max_temporal_mask_prob = max_temporal_mask_prob
+        self.min_num_temporal_mask_spans = min_num_temporal_mask_spans
 
         self.temporal_mask_embed = Parameter(
             torch.empty((model_dim,), device=device, dtype=dtype)
@@ -66,6 +70,7 @@ class Wav2Vec2Masker(Module):
 
         self.spatial_span_len = spatial_span_len
         self.max_spatial_mask_prob = max_spatial_mask_prob
+        self.min_num_spatial_mask_spans = min_num_spatial_mask_spans
 
         self.reset_parameters()
 
@@ -100,7 +105,7 @@ class Wav2Vec2Masker(Module):
             span_len=self.temporal_span_len,
             max_mask_prob=self.max_temporal_mask_prob,
             row_lens=padding_mask.seq_lens if padding_mask is not None else None,
-            min_num_spans=2,
+            min_num_spans=self.min_num_temporal_mask_spans,
             device=seqs.device,
         )
 
@@ -115,7 +120,7 @@ class Wav2Vec2Masker(Module):
                 shape=(batch_size, model_dim),
                 span_len=self.spatial_span_len,
                 max_mask_prob=self.max_spatial_mask_prob,
-                min_num_spans=2,
+                min_num_spans=self.min_num_spatial_mask_spans,
                 device=seqs.device,
             )
 
@@ -149,8 +154,10 @@ def extract_masked_elements(seqs: Tensor, temporal_mask: Tensor) -> Tensor:
         The temporal mask. *Shape:* :math:`(N,S)`, where :math:`N` is the batch
         size and :math`S` is the sequence length.
     """
+    batch_size = seqs.size(0)
+
     # (N, S, M) -> (N x T, M)
     seqs = seqs[temporal_mask]
 
     # (N x T, M) -> (N, T, M)
-    return seqs.unflatten(0, (seqs.size(0), -1))  # type: ignore[no-any-return]
+    return seqs.unflatten(0, (batch_size, -1))  # type: ignore[no-any-return]

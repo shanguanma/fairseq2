@@ -17,8 +17,7 @@ from torch.nn.functional import dropout, softmax
 
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.transformer.attention_mask import AttentionMask, CausalAttentionMask
-from fairseq2.typing import finaloverride
-from fairseq2.utils.version import is_pt2_or_greater
+from fairseq2.typing import override
 
 logger = logging.getLogger(__name__)
 
@@ -87,14 +86,11 @@ class TorchSDPA(SDPA):
         """
         super().__init__()
 
-        if not is_pt2_or_greater():
-            raise ValueError("`TorchSDPA` requires PyTorch 2.0.0 or greater.")
-
         self._has_warned = False
 
         self.attn_dropout_p = attn_dropout_p
 
-    @finaloverride
+    @override
     def forward(
         self,
         seqs: Tensor,
@@ -105,23 +101,9 @@ class TorchSDPA(SDPA):
         attn_mask: Optional[AttentionMask] = None,
         needs_weights: bool = False,
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        if not seqs.is_cuda:
-            return _naive_scaled_dot_product_attention(
-                seqs,
-                keys,
-                key_padding_mask,
-                values,
-                attn_mask,
-                self.attn_dropout_p,
-                needs_weights,
-                self.training,
-            )
-
         if needs_weights:
             if not self._has_warned:
-                logger.warning(
-                    "`TorchSDPA` has to fall back to the naive SDPA implementation because of `needs_weights` set to `True`."
-                )
+                logger.warning("`TorchSDPA` has to fall back to the naive SDPA implementation because of `needs_weights` set to `True`.")  # fmt: skip
 
                 self._has_warned = True
 
@@ -160,7 +142,7 @@ class TorchSDPA(SDPA):
                 mask = torch.where(mask, m, -torch.inf)
         elif isinstance(attn_mask, CausalAttentionMask):
             # PyTorch SDPA supports only full causal attention.
-            if attn_mask.attn_window_len is None:
+            if attn_mask.full_attention():
                 mask = None
 
                 is_causal = True
@@ -204,7 +186,7 @@ class NaiveSDPA(SDPA):
 
         self.attn_dropout_p = attn_dropout_p
 
-    @finaloverride
+    @override
     def forward(
         self,
         seqs: Tensor,
@@ -287,10 +269,7 @@ class SDPAFactory(Protocol):
 
 
 def _get_fallback_sdpa_factory() -> SDPAFactory:
-    if is_pt2_or_greater():
-        return TorchSDPA
-    else:
-        return NaiveSDPA
+    return TorchSDPA
 
 
 _sdpa_factory: SDPAFactory = _get_fallback_sdpa_factory()
@@ -307,7 +286,7 @@ def set_default_sdpa_factory(factory: Optional[SDPAFactory]) -> None:
 
 
 def create_default_sdpa(*, attn_dropout_p: float = 0.0) -> SDPA:
-    """Constructs an instance of the default :class:`SDPA`.
+    """Create an instance of the default :class:`SDPA`.
 
     :param attn_dropout_p:
         The dropout probability on attention weights.

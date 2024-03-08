@@ -5,22 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 
 from pathlib import Path
-from typing import Any, Mapping, final
+from typing import Any, Dict
 
 import torch
 
-from fairseq2.assets import AssetCard, asset_store, download_manager
+from fairseq2.assets import AssetCard, default_asset_store, default_download_manager
+from fairseq2.data.text import StandardTextTokenizerLoader, load_text_tokenizer
 from fairseq2.models.nllb.builder import NllbConfig, create_nllb_model, nllb_archs
 from fairseq2.models.nllb.tokenizer import NllbTokenizer
 from fairseq2.models.transformer import TransformerModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader, TokenizerLoaderBase
+from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_fairseq_checkpoint
-from fairseq2.typing import finaloverride
 
 
 def convert_nllb_checkpoint(
-    checkpoint: Mapping[str, Any], config: NllbConfig
-) -> Mapping[str, Any]:
+    checkpoint: Dict[str, Any], config: NllbConfig
+) -> Dict[str, Any]:
     """Convert a fairseq NLLB checkpoint to fairseq2."""
     state_dict = checkpoint["model"]
 
@@ -32,6 +32,8 @@ def convert_nllb_checkpoint(
         # fmt: off
         r"^encoder\.embed_tokens\.":                              r"encoder_frontend.embed.",
         r"^decoder\.embed_tokens\.":                              r"decoder_frontend.embed.",
+        r"^encoder\.layernorm_embedding\.":                       r"encoder_frontend.layer_norm.",
+        r"^decoder\.layernorm_embedding\.":                       r"decoder_frontend.layer_norm.",
         r"^decoder\.layers\.([0-9]+)\.self_attn\.out_proj\.":     r"decoder.layers.\1.self_attn.output_proj.",
         r"^encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.":     r"encoder.layers.\1.self_attn.output_proj.",
         r"^decoder\.layers\.([0-9]+)\.encoder_attn\.out_proj\.":  r"decoder.layers.\1.encoder_decoder_attn.output_proj.",
@@ -75,28 +77,28 @@ def convert_nllb_checkpoint(
     return checkpoint
 
 
-@final
-class NllbTokenizerLoader(TokenizerLoaderBase[NllbTokenizer]):
-    """Loads tokenizers used by NLLB models."""
+def _create_nllb_tokenizer(path: Path, card: AssetCard) -> NllbTokenizer:
+    langs = card.field("langs").as_list(str)
 
-    @finaloverride
-    def _load(self, pathname: Path, card: AssetCard) -> NllbTokenizer:
-        langs = card.field("langs").as_list(str)
+    default_lang = card.field("default_lang").as_(str)
 
-        default_lang = card.field("default_lang").as_(str)
-
-        return NllbTokenizer(pathname, langs, default_lang)
+    return NllbTokenizer(path, langs, default_lang)
 
 
-load_nllb_config = ConfigLoader[NllbConfig](asset_store, nllb_archs)
+load_nllb_config = ConfigLoader[NllbConfig](default_asset_store, nllb_archs)
 
 load_nllb_model = ModelLoader[TransformerModel, NllbConfig](
-    asset_store,
-    download_manager,
+    default_asset_store,
+    default_download_manager,
     load_nllb_config,
     create_nllb_model,
     convert_nllb_checkpoint,
+    mmap=True,
     restrict_checkpoints=False,
 )
 
-load_nllb_tokenizer = NllbTokenizerLoader(asset_store, download_manager)
+load_nllb_tokenizer = StandardTextTokenizerLoader[NllbTokenizer](
+    default_asset_store, default_download_manager, _create_nllb_tokenizer
+)
+
+load_text_tokenizer.register_loader("nllb", load_nllb_tokenizer)

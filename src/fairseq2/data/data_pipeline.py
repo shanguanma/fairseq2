@@ -6,31 +6,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
-    Iterable,
     Iterator,
+    List,
     Mapping,
     Optional,
     Sequence,
     Tuple,
     TypedDict,
     Union,
+    final,
 )
 
+from fairseq2n import DOC_MODE
 from torch import Tensor
 from typing_extensions import Self
 
-from fairseq2 import _DOC_MODE
-from fairseq2.data.typing import PathLike, StringLike
 from fairseq2.memory import MemoryBlock
 
-if TYPE_CHECKING or _DOC_MODE:
+if TYPE_CHECKING or DOC_MODE:
 
-    class DataPipeline(Iterable[Any]):
+    @final
+    class DataPipeline:
         """fairseq2 native data pipeline.
 
         The pipeline state can be persisted to the disk, allowing it to be resumed later.
@@ -50,6 +52,9 @@ if TYPE_CHECKING or _DOC_MODE:
         def reset(self) -> None:
             """Move back to the first example in the data pipeline."""
 
+        def is_infinite(self) -> bool:
+            ...
+
         @property
         def is_broken(self) -> bool:
             """Return ``True`` if the data pipeline is broken.
@@ -65,16 +70,56 @@ if TYPE_CHECKING or _DOC_MODE:
             the returned state dictionary to :meth:`load_state_dict`.
             """
 
-        def load_state_dict(
-            self, state_dict: Mapping[str, Any], strict: bool = True
-        ) -> None:
+        def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
             """Restore the state of the data pipeline from ``state_dict``.
 
             :param state_dict:
                 A state dictionary previously returned by :meth:`state_dict`.
-            :param strict:
-                If ``True``, enforces that the keys in ``state_dict`` match the
-                keys returned by :meth:`state_dict`.
+            """
+
+        @staticmethod
+        def concat(pipelines: Sequence[DataPipeline]) -> DataPipelineBuilder:
+            """Concatenate examples from ``pipelines``.
+
+            :param pipelines:
+                The data pipelines to concatenate.
+            """
+
+        @staticmethod
+        def constant(example: Any, key: Optional[str] = None) -> DataPipelineBuilder:
+            ...
+
+        @staticmethod
+        def count(
+            start: int = 0, step: int = 1, key: Optional[str] = None
+        ) -> DataPipelineBuilder:
+            ...
+
+        @staticmethod
+        def round_robin(
+            pipelines: Sequence[DataPipeline], stop_at_shortest: bool = False
+        ) -> DataPipelineBuilder:
+            """Extract examples from ``pipelines`` in round robin.
+
+            :param pipelines:
+                The data pipelines to round robin.
+            :param stop_at_shortest:
+                If ``True``, stop round_robin when first pipeline reaches its end.
+                If ``False``, circle around finished pipelines until all pipelines
+                reach their end.
+            """
+
+        @staticmethod
+        def sample(
+            pipelines: Sequence[DataPipeline],
+            weights: Optional[Sequence[float]] = None,
+        ) -> DataPipelineBuilder:
+            """Extract examples from ``pipelines`` by sampling based on ``weights``.
+
+            :param data_pipelines:
+                The data pipelines to sample from.
+            :param weights:
+                Desired distribution of pipelines. If None, use uniform distribution.
             """
 
         @staticmethod
@@ -96,56 +141,7 @@ if TYPE_CHECKING or _DOC_MODE:
                 If ``True``, calls each data pipeline sequentially.
             """
 
-        @staticmethod
-        def round_robin(
-            pipelines: Sequence[DataPipeline],
-            stop_at_shortest: bool = False,
-        ) -> DataPipelineBuilder:
-            """Extract examples from ``pipelines`` in round robin.
-
-            :param pipelines:
-                The data pipelines to round robin.
-            :param stop_at_shortest:
-                If ``True``, stop round_robin when first pipeline reaches its end.
-                If ``False``, circle around finished pipelines until all pipelines
-                reach their end.
-            """
-
-        @staticmethod
-        def sample(
-            pipelines: Sequence[DataPipeline],
-            weights: Optional[Sequence[float]] = None,
-            stop_at_shortest: bool = False,
-        ) -> DataPipelineBuilder:
-            """Extract examples from ``pipelines`` by sampling based on ``weights``.
-
-            :param data_pipelines:
-                The data pipelines to sample from.
-            :param weights:
-                Desired distribution of pipelines. If None, use uniform distribution.
-            :param stop_at_shortest:
-                If ``True``, stop sampling when first pipeline reaches its end.
-                If ``False``, circle around finished pipelines until all pipelines
-                reach their end.
-            """
-
-        @staticmethod
-        def constant(example: Any, key: Optional[str] = None) -> DataPipelineBuilder:
-            ...
-
-        @staticmethod
-        def count(start: int = 0, key: Optional[str] = None) -> DataPipelineBuilder:
-            ...
-
-        @staticmethod
-        def concat(pipelines: Sequence[DataPipeline]) -> DataPipelineBuilder:
-            """Concatenate examples from ``pipelines``.
-
-            :param pipelines:
-                The data pipelines to concatenate.
-            """
-            ...
-
+    @final
     class DataPipelineBuilder:
         """API to create DataPipeline"""
 
@@ -163,6 +159,7 @@ if TYPE_CHECKING or _DOC_MODE:
             self,
             bucket_sizes: Sequence[Tuple[int, int]],
             selector: Optional[str] = None,
+            skip_long_examples: bool = False,
             drop_remainder: bool = False,
         ) -> Self:
             """Combine examples of similar shape into batches."""
@@ -281,25 +278,23 @@ if TYPE_CHECKING or _DOC_MODE:
     def get_last_failed_example() -> Any:
         ...
 
-    def list_files(
-        pathname: PathLike, pattern: Optional[StringLike] = None
-    ) -> DataPipelineBuilder:
-        """List recursively all files under ``pathname`` that matches ``pattern``.
+    def list_files(path: Path, pattern: Optional[str] = None) -> DataPipelineBuilder:
+        """List recursively all files under ``path`` that matches ``pattern``.
 
-        :param pathname:
+        :param path:
             The path to traverse.
         :param pattern:
             If non-empty, a pattern that follows the syntax of :mod:`fnmatch`.
         """
 
-    def read_sequence(seq: Sequence[Any]) -> "DataPipelineBuilder":
+    def read_sequence(seq: Sequence[Any]) -> DataPipelineBuilder:
         """Read every element in ``seq``.
 
         :param seq:
             The sequence to read.
         """
 
-    def read_zipped_records(pathname: PathLike) -> DataPipelineBuilder:
+    def read_zipped_records(path: Path) -> DataPipelineBuilder:
         """Read each file in a zip archive"""
         ...
 
@@ -334,6 +329,7 @@ if TYPE_CHECKING or _DOC_MODE:
         def pad_to_multiple(self) -> int:
             ...
 
+    @final
     class Collater:
         """Concatenate a list of inputs into a single inputs.
 
@@ -379,6 +375,7 @@ if TYPE_CHECKING or _DOC_MODE:
             """Concatenate the input tensors"""
             ...
 
+    @final
     class FileMapper:
         """For a given file name, returns the file content as bytes.
 
@@ -397,13 +394,13 @@ if TYPE_CHECKING or _DOC_MODE:
 
         def __init__(
             self,
-            root_dir: Optional[PathLike] = None,
+            root_dir: Optional[Path] = None,
             cached_fd_count: Optional[int] = None,
         ) -> None:
             ...
 
-        def __call__(self, filename: PathLike) -> FileMapperOutput:
-            """Parses the file name and returns the file bytes.
+        def __call__(self, pathname: str) -> FileMapperOutput:
+            """Parses the pathname and returns the file bytes.
 
             :returns:
                 A dict with the following keys::
@@ -474,5 +471,39 @@ class SequenceData(TypedDict):
 
 
 class FileMapperOutput(TypedDict):
-    path: PathLike
+    path: str
     data: MemoryBlock
+
+
+def create_bucket_sizes(
+    max_num_elements: int, max_seq_len: int, min_seq_len: int = 1
+) -> List[Tuple[int, int]]:
+    """Create optimal bucket sizes for ``max_num_elements`` with ``max_seq_len``.
+
+    This is a convenience function that can be used with the
+    :meth:`DataPipeline.bucket_by_length` operator.
+    """
+    if max_num_elements < max_seq_len:
+        raise ValueError(
+            f"`max_seq_len` must be less than or equal to `max_num_elements` ({max_num_elements}), but is {max_seq_len} instead."
+        )
+
+    if min_seq_len > max_seq_len:
+        raise ValueError(
+            f"`min_seq_len` must be less than or equal to `max_seq_len` ({max_seq_len}), but is {min_seq_len} instead."
+        )
+
+    bucket_sizes = []
+
+    seq_len = min_seq_len
+
+    batch_size = max_num_elements // seq_len
+
+    while seq_len <= max_seq_len:
+        bucket_sizes.append((batch_size, seq_len))
+
+        batch_size = max_num_elements // (seq_len + 1)
+
+        seq_len = max_num_elements // batch_size
+
+    return bucket_sizes

@@ -4,19 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Mapping
+from typing import Any, Dict
 
-from fairseq2.assets import asset_store, download_manager
+from fairseq2.assets import default_asset_store, default_download_manager
+from fairseq2.data.text import load_basic_sentencepiece_tokenizer, load_text_tokenizer
 from fairseq2.models.llama.builder import LLaMAConfig, create_llama_model, llama_archs
-from fairseq2.models.llama.tokenizer import LLaMATokenizer
 from fairseq2.models.transformer import TransformerDecoderModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader, TokenizerLoader
+from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_model_state_dict
 
 
 def convert_llama_checkpoint(
-    checkpoint: Mapping[str, Any], config: LLaMAConfig
-) -> Mapping[str, Any]:
+    checkpoint: Dict[str, Any], config: LLaMAConfig
+) -> Dict[str, Any]:
     """Convert a reference LLaMA checkpoint to fairseq2."""
     key_map = {
         # fmt: off
@@ -43,16 +43,17 @@ def convert_llama_checkpoint(
     return {"model": checkpoint}
 
 
-load_llama_config = ConfigLoader[LLaMAConfig](asset_store, llama_archs)
+load_llama_config = ConfigLoader[LLaMAConfig](default_asset_store, llama_archs)
 
 load_llama_model = ModelLoader[TransformerDecoderModel, LLaMAConfig](
-    asset_store,
-    download_manager,
+    default_asset_store,
+    default_download_manager,
     load_llama_config,
     create_llama_model,
     convert_llama_checkpoint,
+    mmap=True,
 )
 
-load_llama_tokenizer = TokenizerLoader[LLaMATokenizer](
-    asset_store, download_manager, LLaMATokenizer
-)
+load_llama_tokenizer = load_basic_sentencepiece_tokenizer
+
+load_text_tokenizer.register_loader("llama", load_llama_tokenizer)

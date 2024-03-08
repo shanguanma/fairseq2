@@ -4,16 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union, final
 
+from fairseq2n import DOC_MODE
 from torch import Tensor
 
-from fairseq2 import _DOC_MODE
-from fairseq2.data.typing import StringLike
 from fairseq2.typing import DataType
 
-if TYPE_CHECKING or _DOC_MODE:
+if TYPE_CHECKING or DOC_MODE:
 
+    @final
     class StrSplitter:
         """Split string on a given character.
 
@@ -47,20 +47,20 @@ if TYPE_CHECKING or _DOC_MODE:
         ) -> None:
             ...
 
-        def __call__(
-            self, s: StringLike
-        ) -> Union[List[StringLike], Dict[str, StringLike]]:
+        def __call__(self, s: str) -> Union[List[str], Dict[str, str]]:
             ...
 
+    @final
     class StrToIntConverter:
         """Parses integers in a given base"""
 
         def __init__(self, base: int = 10) -> None:
             ...
 
-        def __call__(self, s: StringLike) -> int:
+        def __call__(self, s: str) -> int:
             ...
 
+    @final
     class StrToTensorConverter:
         def __init__(
             self,
@@ -69,7 +69,7 @@ if TYPE_CHECKING or _DOC_MODE:
         ) -> None:
             ...
 
-        def __call__(self, s: StringLike) -> Tensor:
+        def __call__(self, s: str) -> Tensor:
             ...
 
 else:

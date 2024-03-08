@@ -4,32 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Sequence, final
 
+from fairseq2n import DOC_MODE
 from torch import Tensor
 
-from fairseq2 import _DOC_MODE
+from fairseq2.assets import default_asset_store, default_download_manager
 from fairseq2.data.text.text_tokenizer import (
+    StandardTextTokenizerLoader,
     TextTokenDecoder,
     TextTokenEncoder,
     TextTokenizer,
 )
-from fairseq2.data.typing import PathLike, StringLike
 from fairseq2.data.vocabulary_info import VocabularyInfo
-from fairseq2.typing import Device, finaloverride
+from fairseq2.typing import Device, override
 
-if TYPE_CHECKING or _DOC_MODE:
+if TYPE_CHECKING or DOC_MODE:
 
     @final
     class SentencePieceModel:
         def __init__(
-            self,
-            pathname: PathLike,
-            control_symbols: Optional[Sequence[StringLike]] = None,
+            self, path: Path, control_symbols: Optional[Sequence[str]] = None
         ) -> None:
             ...
 
-        def token_to_index(self, token: StringLike) -> int:
+        def token_to_index(self, token: str) -> int:
             ...
 
         def index_to_token(self, idx: int) -> str:
@@ -60,8 +60,8 @@ if TYPE_CHECKING or _DOC_MODE:
         def __init__(
             self,
             model: SentencePieceModel,
-            prefix_tokens: Optional[Sequence[StringLike]] = None,
-            suffix_tokens: Optional[Sequence[StringLike]] = None,
+            prefix_tokens: Optional[Sequence[str]] = None,
+            suffix_tokens: Optional[Sequence[str]] = None,
             reverse: bool = False,
             enable_sampling: bool = False,
             nbest_size: int = -1,
@@ -71,21 +71,21 @@ if TYPE_CHECKING or _DOC_MODE:
         ) -> None:
             ...
 
-        @finaloverride
-        def __call__(self, text: StringLike) -> Tensor:
+        @override
+        def __call__(self, text: str) -> Tensor:
             ...
 
-        @finaloverride
-        def encode_as_tokens(self, text: StringLike) -> List[StringLike]:
+        @override
+        def encode_as_tokens(self, text: str) -> List[str]:
             ...
 
         @property
-        @finaloverride
+        @override
         def prefix_indices(self) -> Optional[Tensor]:
             ...
 
         @property
-        @finaloverride
+        @override
         def suffix_indices(self) -> Optional[Tensor]:
             ...
 
@@ -94,12 +94,12 @@ if TYPE_CHECKING or _DOC_MODE:
         def __init__(self, model: SentencePieceModel, reverse: bool = False) -> None:
             ...
 
-        @finaloverride
-        def __call__(self, token_indices: Tensor) -> StringLike:
+        @override
+        def __call__(self, token_indices: Tensor) -> str:
             ...
 
-        @finaloverride
-        def decode_from_tokens(self, tokens: Sequence[StringLike]) -> StringLike:
+        @override
+        def decode_from_tokens(self, tokens: Sequence[str]) -> str:
             ...
 
 else:
@@ -125,48 +125,54 @@ else:
     _set_module_name()
 
 
-class SentencePieceTokenizerBase(TextTokenizer):
-    """Represents an abstract base class for SentencePiece tokenizers."""
+class SentencePieceTokenizer(TextTokenizer):
+    """Represents a SentencePiece tokenizer."""
 
-    model: SentencePieceModel
+    _model: SentencePieceModel
 
     def __init__(
-        self, pathname: PathLike, control_symbols: Optional[Sequence[StringLike]] = None
+        self, path: Path, control_symbols: Optional[Sequence[str]] = None
     ) -> None:
         """
-        :param pathname:
-            The pathname of the SentencePiece model file.
+        :param path:
+            The path to the SentencePiece model file.
         :param control_symbols:
             The list of control symbols to add to the SentencePiece model.
         """
-        self.model = SentencePieceModel(pathname, control_symbols)
+        self._model = SentencePieceModel(path, control_symbols)
 
-        vocab_info = vocab_info_from_sentencepiece(self.model)
+        vocab_info = vocab_info_from_sentencepiece(self._model)
 
         super().__init__(vocab_info)
 
-    @finaloverride
+    @override
     def create_raw_encoder(
         self, *, device: Optional[Device] = None, pin_memory: bool = False
     ) -> SentencePieceEncoder:
-        return SentencePieceEncoder(self.model, device=device, pin_memory=pin_memory)
+        return SentencePieceEncoder(self._model, device=device, pin_memory=pin_memory)
 
-    @finaloverride
+    @override
     def create_decoder(self) -> SentencePieceDecoder:
-        return SentencePieceDecoder(self.model)
+        return SentencePieceDecoder(self._model)
+
+    @final
+    @property
+    def model(self) -> SentencePieceModel:
+        return self._model
 
 
-class BasicSentencePieceTokenizer(SentencePieceTokenizerBase):
+@final
+class BasicSentencePieceTokenizer(SentencePieceTokenizer):
     """Represents a SentencePiece tokenizer that encodes text with BOS and EOS."""
 
-    def __init__(self, pathname: PathLike) -> None:
+    def __init__(self, path: Path) -> None:
         """
-        :param pathname:
-            The pathname of the SentencePiece model file.
+        :param path:
+            The path to the SentencePiece model file.
         """
-        super().__init__(pathname)
+        super().__init__(path)
 
-    @finaloverride
+    @override
     def create_encoder(
         self,
         *,
@@ -208,12 +214,19 @@ class BasicSentencePieceTokenizer(SentencePieceTokenizerBase):
             )
 
         return SentencePieceEncoder(
-            self.model,
+            self._model,
             prefix_tokens=prefix_tokens,
             suffix_tokens=suffix_tokens,
             device=device,
             pin_memory=pin_memory,
         )
+
+
+load_basic_sentencepiece_tokenizer = StandardTextTokenizerLoader(
+    default_asset_store,
+    default_download_manager,
+    lambda path, _: BasicSentencePieceTokenizer(path),
+)
 
 
 def vocab_info_from_sentencepiece(model: SentencePieceModel) -> VocabularyInfo:

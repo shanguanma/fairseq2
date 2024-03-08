@@ -13,19 +13,25 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from typing_extensions import TypeAlias
 
-from fairseq2.typing import finaloverride
+from fairseq2.typing import override
 
 LRScheduler: TypeAlias = _LRScheduler
 
 
-class LRSchedulerBase(ABC, LRScheduler):
-    """Represents the abstract base class for learning rate schedulers."""
+def get_effective_lr(scheduler: LRScheduler) -> float:
+    """Return the effective learning rate computed by ``scheduler``."""
+    return scheduler.get_last_lr()[0]
 
-    @finaloverride
+
+class AbstractLRScheduler(ABC, LRScheduler):
+    """Provides a skeletal implementation of :class:`LRScheduler`."""
+
+    @final
+    @override
     def get_lr(self) -> List[float]:  # type: ignore[override]
         if not self._get_lr_called_within_step:  # type: ignore[attr-defined]
             warnings.warn(
-                "To get the last learning rate computed by the scheduler, please use `get_last_lr()`."
+                "To get the last learning rate computed by the scheduler, use `get_last_lr()`."
             )
 
         return self._compute_lrs()
@@ -36,7 +42,7 @@ class LRSchedulerBase(ABC, LRScheduler):
 
 
 @final
-class NoamLR(LRSchedulerBase):
+class NoamLR(AbstractLRScheduler):
     """Represents the learning rate schedule described in Section 5.3 of
     :cite:t:`https://doi.org/10.48550/arxiv.1706.03762`.
 
@@ -56,7 +62,7 @@ class NoamLR(LRSchedulerBase):
         This scheduler is not chainable.
     """
 
-    num_warmup_steps: int
+    _num_warmup_steps: int
 
     def __init__(
         self,
@@ -64,7 +70,6 @@ class NoamLR(LRSchedulerBase):
         num_warmup_steps: int,
         *,
         last_epoch: int = -1,
-        verbose: bool = False,
     ) -> None:
         """
         :param optimizer:
@@ -73,18 +78,16 @@ class NoamLR(LRSchedulerBase):
             The number of warmup steps.
         :param last_epoch:
             The index of the last epoch.
-        :param verbose:
-            If ``True``, prints a message to stdout for each update.
         """
-        self.num_warmup_steps = num_warmup_steps
+        self._num_warmup_steps = num_warmup_steps
 
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
-    @finaloverride
+    @override
     def _compute_lrs(self) -> List[float]:
         # Linearly increase the learning rate during warmup.
-        if self.last_epoch < self.num_warmup_steps:
-            c = self.last_epoch * self.num_warmup_steps**-1.5
+        if self.last_epoch < self._num_warmup_steps:
+            c = self.last_epoch * self._num_warmup_steps**-1.5
 
         # No warmup requested, decay from the base learning rate.
         elif self.last_epoch == 0:
@@ -99,7 +102,7 @@ class NoamLR(LRSchedulerBase):
 
 
 @final
-class MyleLR(LRSchedulerBase):
+class MyleLR(AbstractLRScheduler):
     """Represents a scaled version of :class:`NoamLR` that preserves the base
     learning rate of the associated optimizer.
 
@@ -118,8 +121,8 @@ class MyleLR(LRSchedulerBase):
         This scheduler is not chainable.
     """
 
-    num_warmup_steps: int
-    start_lrs: Sequence[float]
+    _num_warmup_steps: int
+    _start_lrs: Sequence[float]
 
     def __init__(
         self,
@@ -128,7 +131,6 @@ class MyleLR(LRSchedulerBase):
         *,
         start_lr: Union[float, Sequence[float]] = 0.0,
         last_epoch: int = -1,
-        verbose: bool = False,
     ) -> None:
         """
         :param optimizer:
@@ -140,35 +142,33 @@ class MyleLR(LRSchedulerBase):
             parameter group respectively.
         :param last_epoch:
             The index of the last epoch.
-        :param verbose:
-            If ``True``, prints a message to stdout for each update.
         """
         if num_warmup_steps == 0:
             raise ValueError("`num_warmup_steps` must be greater than 0.")
 
-        self.num_warmup_steps = num_warmup_steps
+        self._num_warmup_steps = num_warmup_steps
 
-        self.start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
+        self._start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
 
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
-    @finaloverride
+    @override
     def _compute_lrs(self) -> List[float]:
         # Linearly increase the learning rate to its base value during warmup.
-        if self.last_epoch < self.num_warmup_steps:
-            c = self.last_epoch / self.num_warmup_steps
+        if self.last_epoch < self._num_warmup_steps:
+            c = self.last_epoch / self._num_warmup_steps
 
-            return [s + (b - s) * c for b, s in zip(self.base_lrs, self.start_lrs)]
+            return [s + (b - s) * c for b, s in zip(self.base_lrs, self._start_lrs)]
 
         # After the warmup, decay the learning rate proportional to the inverse
         # square root of the step number.
-        c = (self.num_warmup_steps / self.last_epoch) ** 0.5
+        c = (self._num_warmup_steps / self.last_epoch) ** 0.5
 
         return [b * c for b in self.base_lrs]
 
 
 @final
-class PolynomialDecayLR(LRSchedulerBase):
+class PolynomialDecayLR(AbstractLRScheduler):
     """Represents the polynomial decay learning rate schedule.
 
     **During warmup:**
@@ -190,11 +190,11 @@ class PolynomialDecayLR(LRSchedulerBase):
         This scheduler is not chainable.
     """
 
-    num_steps: int
-    num_warmup_steps: int
-    power: float
-    start_lrs: Sequence[float]
-    final_lrs: Sequence[float]
+    _num_steps: int
+    _num_warmup_steps: int
+    _power: float
+    _start_lrs: Sequence[float]
+    _final_lrs: Sequence[float]
 
     def __init__(
         self,
@@ -206,7 +206,6 @@ class PolynomialDecayLR(LRSchedulerBase):
         start_lr: Union[float, Sequence[float]] = 0.0,
         final_lr: Union[float, Sequence[float]] = 0.0,
         last_epoch: int = -1,
-        verbose: bool = False,
     ) -> None:
         """
         :param optimizer:
@@ -226,46 +225,44 @@ class PolynomialDecayLR(LRSchedulerBase):
             parameter group respectively.
         :param last_epoch:
             The index of the last epoch.
-        :param verbose:
-            If ``True``, prints a message to stdout for each update.
         """
         if num_warmup_steps >= num_steps:
             raise ValueError(
                 f"`num_warmup_steps` must be less than `num_steps` ({num_steps}), but is {num_warmup_steps} instead."
             )
 
-        self.num_steps = num_steps
-        self.num_warmup_steps = num_warmup_steps
-        self.power = power
+        self._num_steps = num_steps
+        self._num_warmup_steps = num_warmup_steps
+        self._power = power
 
-        self.start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
-        self.final_lrs = _get_per_param_group(optimizer, "final_lr", final_lr)
+        self._start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
+        self._final_lrs = _get_per_param_group(optimizer, "final_lr", final_lr)
 
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
-    @finaloverride
+    @override
     def _compute_lrs(self) -> List[float]:
         # The decay is already complete, return the final learning rate.
-        if self.last_epoch >= self.num_steps:
-            return [f for f in self.final_lrs]
+        if self.last_epoch >= self._num_steps:
+            return [f for f in self._final_lrs]
 
         # Linearly increase the learning rate to its base value during warmup.
-        if self.last_epoch <= self.num_warmup_steps:
-            c = self.last_epoch / self.num_warmup_steps
+        if self.last_epoch <= self._num_warmup_steps:
+            c = self.last_epoch / self._num_warmup_steps
 
-            return [s + (b - s) * c for b, s in zip(self.base_lrs, self.start_lrs)]
+            return [s + (b - s) * c for b, s in zip(self.base_lrs, self._start_lrs)]
 
         # After the warmup, decay the learning rate to its final value.
-        r = self.num_steps - self.last_epoch
-        t = self.num_steps - self.num_warmup_steps
+        r = self._num_steps - self.last_epoch
+        t = self._num_steps - self._num_warmup_steps
 
-        c = (r / t) ** self.power
+        c = (r / t) ** self._power
 
-        return [f + (b - f) * c for b, f in zip(self.base_lrs, self.final_lrs)]
+        return [f + (b - f) * c for b, f in zip(self.base_lrs, self._final_lrs)]
 
 
 @final
-class CosineAnnealingLR(LRSchedulerBase):
+class CosineAnnealingLR(AbstractLRScheduler):
     """Represents the learning rate schedule described in
     :cite:t:`https://doi.org/10.48550/arxiv.1608.03983`.
 
@@ -298,12 +295,12 @@ class CosineAnnealingLR(LRSchedulerBase):
         This scheduler is not chainable.
     """
 
-    cycle_len: int
-    cycle_mul: float
-    num_warmup_steps: int
-    lr_mul: float
-    start_lrs: Sequence[float]
-    final_lrs: Sequence[float]
+    _cycle_len: int
+    _cycle_mul: float
+    _num_warmup_steps: int
+    _lr_mul: float
+    _start_lrs: Sequence[float]
+    _final_lrs: Sequence[float]
 
     def __init__(
         self,
@@ -316,7 +313,6 @@ class CosineAnnealingLR(LRSchedulerBase):
         start_lr: Union[float, Sequence[float]] = 0.0,
         final_lr: Union[float, Sequence[float]] = 0.0,
         last_epoch: int = -1,
-        verbose: bool = False,
     ) -> None:
         """
         :param optimizer:
@@ -338,34 +334,32 @@ class CosineAnnealingLR(LRSchedulerBase):
             parameter group respectively, at the end of the first cycle.
         :param last_epoch:
             The index of the last epoch.
-        :param verbose:
-            If ``True``, prints a message to stdout for each update.
         """
-        self.cycle_len = cycle_len
-        self.cycle_mul = cycle_mul
-        self.num_warmup_steps = num_warmup_steps
-        self.lr_mul = lr_mul
+        self._cycle_len = cycle_len
+        self._cycle_mul = cycle_mul
+        self._num_warmup_steps = num_warmup_steps
+        self._lr_mul = lr_mul
 
-        self.start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
-        self.final_lrs = _get_per_param_group(optimizer, "final_lr", final_lr)
+        self._start_lrs = _get_per_param_group(optimizer, "start_lr", start_lr)
+        self._final_lrs = _get_per_param_group(optimizer, "final_lr", final_lr)
 
-        super().__init__(optimizer, last_epoch, verbose)
+        super().__init__(optimizer, last_epoch)
 
-    @finaloverride
+    @override
     def _compute_lrs(self) -> List[float]:
         # Linearly increase the learning rate to its base value during warmup.
-        if self.last_epoch <= self.num_warmup_steps:
-            c = self.last_epoch / self.num_warmup_steps
+        if self.last_epoch <= self._num_warmup_steps:
+            c = self.last_epoch / self._num_warmup_steps
 
-            return [i + (b - i) * c for b, i in zip(self.base_lrs, self.start_lrs)]
+            return [i + (b - i) * c for b, i in zip(self.base_lrs, self._start_lrs)]
 
-        curr_step = self.last_epoch - self.num_warmup_steps
+        curr_step = self.last_epoch - self._num_warmup_steps
 
         # When each cycle has equal length, the computation is straightforward.
-        if self.cycle_mul == 1.0:
-            cycle_num = curr_step // self.cycle_len
+        if self._cycle_mul == 1.0:
+            cycle_num = curr_step // self._cycle_len
 
-            cycle_len = self.cycle_len
+            cycle_len = self._cycle_len
 
             # The position of the step within the cycle.
             cycle_pos = curr_step - (cycle_num * cycle_len)
@@ -374,26 +368,26 @@ class CosineAnnealingLR(LRSchedulerBase):
         # a geometric series to find out the number, length, and offset of the
         # current cycle.
         else:
-            mul = self.cycle_mul
+            mul = self._cycle_mul
 
             # Solve the equation \sum_{i=0}^{n} len(cycle_i) + x = step for n.
-            cycle_num = int(math.log(1 - curr_step / self.cycle_len * (1 - mul), mul))
+            cycle_num = int(math.log(1 - curr_step / self._cycle_len * (1 - mul), mul))
 
-            cycle_len = int(mul**cycle_num * self.cycle_len)
+            cycle_len = int(mul**cycle_num * self._cycle_len)
 
             # Compute the sum of the lengths of the first `cycle_num` cycles
             # (i.e. geometric series) which corresponds to the beginning offset
             # of the current cycle.
-            cycle_offset = int((1 - mul**cycle_num) / (1 - mul) * self.cycle_len)
+            cycle_offset = int((1 - mul**cycle_num) / (1 - mul) * self._cycle_len)
 
             # The position of the step within the cycle.
             cycle_pos = curr_step - cycle_offset
 
-        lr_mul = self.lr_mul**cycle_num
+        lr_mul = self._lr_mul**cycle_num
 
         c = math.cos(math.pi * cycle_pos / cycle_len)
 
-        min_lrs, max_lrs = self.final_lrs, self.base_lrs
+        min_lrs, max_lrs = self._final_lrs, self.base_lrs
 
         return [self._cycle_lr(mn, mx, lr_mul, c) for mn, mx in zip(min_lrs, max_lrs)]
 

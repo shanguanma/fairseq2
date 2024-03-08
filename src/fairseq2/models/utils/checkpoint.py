@@ -6,14 +6,15 @@
 
 import re
 import warnings
+from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Union
 
 import torch
 from torch import Tensor
 from typing_extensions import TypeAlias
 
-from fairseq2.data.typing import PathLike
 from fairseq2.typing import Device
+from fairseq2.utils.version import _is_pt21_or_greater
 
 MapLocation: TypeAlias = Optional[
     Union[Callable[[Tensor, str], Tensor], Device, str, Dict[str, str]]
@@ -23,7 +24,7 @@ MapLocation: TypeAlias = Optional[
 class CheckpointConverter(Protocol):
     """Converts checkpoints to fairseq2."""
 
-    def __call__(self, checkpoint: Mapping[str, Any]) -> Mapping[str, Any]:
+    def __call__(self, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
         """
         :param checkpoint:
             The checkpoint to convert.
@@ -34,18 +35,21 @@ class CheckpointConverter(Protocol):
 
 
 def load_checkpoint(
-    pathname: PathLike,
+    path: Path,
     *,
     map_location: MapLocation = None,
+    mmap: bool = False,
     restrict: bool = False,
     converter: Optional[CheckpointConverter] = None,
-) -> Mapping[str, Any]:
-    """Load the checkpoint stored in ``pathname``.
+) -> Dict[str, Any]:
+    """Load the checkpoint stored in ``path``.
 
-    :param pathname:
-        The pathname of the checkpoint.
+    :param path:
+        The path to the checkpoint.
     :param map_location:
         Same as the ``map_location`` parameter of :meth:`torch.load`.
+    :param mmap:
+        If ``True``, indicates whether the checkpoint should be memory mapped.
     :param restrict:
         If ``True``, restricts the Python unpickler to load only tensors,
         primitive types, and dictionaries.
@@ -60,8 +64,13 @@ def load_checkpoint(
         # Suppress the noisy deprecated `TypedStorage` warning.
         warnings.simplefilter("ignore")
 
-        checkpoint: Mapping[str, Any] = torch.load(
-            str(pathname), map_location, weights_only=restrict
+        kwargs = {}
+
+        if mmap and _is_pt21_or_greater():
+            kwargs["mmap"] = True
+
+        checkpoint: Dict[str, Any] = torch.load(
+            str(path), map_location, weights_only=restrict, **kwargs
         )
 
     if converter is not None:
@@ -71,7 +80,7 @@ def load_checkpoint(
 
 
 def convert_model_state_dict(
-    state_dict: Mapping[str, Any], key_map: Mapping[str, str]
+    state_dict: Dict[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a model state dictionary to fairseq2.
 
@@ -102,7 +111,7 @@ def convert_model_state_dict(
 
 
 def convert_fairseq_checkpoint(
-    checkpoint: Mapping[str, Any], key_map: Mapping[str, str]
+    checkpoint: Dict[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a fairseq checkpoint to fairseq2.
 

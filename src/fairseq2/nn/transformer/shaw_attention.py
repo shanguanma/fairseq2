@@ -14,7 +14,7 @@ from fairseq2.nn.embedding import StandardEmbedding
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.transformer.attention import SDPA, create_default_sdpa
 from fairseq2.nn.transformer.attention_mask import AttentionMask, CustomAttentionMask
-from fairseq2.typing import DataType, Device, finaloverride
+from fairseq2.typing import DataType, Device, override
 
 
 @final
@@ -96,7 +96,7 @@ class ShawRelativePositionSDPA(SDPA):
         else:
             self.inner_sdpa = create_default_sdpa()
 
-    @finaloverride
+    @override
     def forward(
         self,
         seqs: Tensor,
@@ -108,9 +108,6 @@ class ShawRelativePositionSDPA(SDPA):
         needs_weights: bool = False,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         q_len = seqs.size(2)
-
-        # (N, H, S, K_h) @ (N, H, K_h, S_kv) = (N, H, S, S_kv)
-        attn_weights = torch.matmul(seqs, keys.transpose(-1, -2))
 
         # (S_kv, S_kv)
         rel_indices = self._get_relative_indices(keys)

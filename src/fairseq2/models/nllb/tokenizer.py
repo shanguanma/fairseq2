@@ -4,26 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from pathlib import Path
 from typing import Optional, Sequence, Set, final
 
-from fairseq2.data.text import SentencePieceEncoder, SentencePieceTokenizerBase
-from fairseq2.data.typing import PathLike
-from fairseq2.typing import Device, finaloverride
+from fairseq2.data.text import SentencePieceEncoder, SentencePieceTokenizer
+from fairseq2.typing import Device, override
 
 
 @final
-class NllbTokenizer(SentencePieceTokenizerBase):
-    """Represents the tokenizer used by NLLB models."""
+class NllbTokenizer(SentencePieceTokenizer):
+    """Represents a tokenizer used by NLLB models."""
 
-    langs: Set[str]
-    default_lang: str
+    _langs: Set[str]
+    _default_lang: str
 
-    def __init__(
-        self, pathname: PathLike, langs: Sequence[str], default_lang: str
-    ) -> None:
+    def __init__(self, path: Path, langs: Sequence[str], default_lang: str) -> None:
         """
-        :param pathname:
-            The pathname of the SentencePiece model file.
+        :param path:
+            The path to the SentencePiece model file.
         :param langs:
             The list of supported languages.
         :param default_lang:
@@ -40,13 +38,13 @@ class NllbTokenizer(SentencePieceTokenizerBase):
         # it to the model at index 0.
         control_symbols.append("<pad>@0")
 
-        super().__init__(pathname, control_symbols)
+        super().__init__(path, control_symbols)
 
-        self.langs = set(langs)
+        self._langs = set(langs)
 
-        self.default_lang = default_lang
+        self._default_lang = default_lang
 
-    @finaloverride
+    @override
     def create_encoder(
         self,
         *,
@@ -76,9 +74,9 @@ class NllbTokenizer(SentencePieceTokenizerBase):
             raise ValueError(f"`task` must be 'translation', but is '{task}' instead.")
 
         if lang is None:
-            lang = self.default_lang
+            lang = self._default_lang
 
-        if lang not in self.langs:
+        if lang not in self._langs:
             raise ValueError(
                 f"`lang` must be a supported language, but is '{lang}' instead."
             )
@@ -108,7 +106,7 @@ class NllbTokenizer(SentencePieceTokenizerBase):
             )
 
         return SentencePieceEncoder(
-            self.model,
+            self._model,
             prefix_tokens=prefix_tokens,
             suffix_tokens=suffix_tokens,
             device=device,

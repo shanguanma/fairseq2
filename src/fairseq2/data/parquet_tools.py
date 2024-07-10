@@ -15,7 +15,6 @@ import torch
 from numpy.typing import NDArray
 from pyarrow.dataset import get_partition_keys  # requires pyarrow >= 13
 
-from fairseq2.data import CString
 from fairseq2.data.data_pipeline import DataPipeline, DataPipelineBuilder, read_sequence
 
 
@@ -40,7 +39,7 @@ def torch_random_seed(seed: Optional[int] = None) -> Generator[None, None, None]
 
 
 NestedDict = Dict[str, "NestedDictValue"]
-NestedDictValue = Union[torch.Tensor, List[CString], pd.Series, NestedDict]
+NestedDictValue = Union[torch.Tensor, List[str], pd.Series, NestedDict]
 BatchOutputType = Union[pa.Table, pd.DataFrame, NestedDict]
 
 
@@ -73,7 +72,7 @@ def from_pyarrow_to_torch_tensor(
         return from_pyarrow_to_torch_tensor(arr.dictionary_decode())
 
     if pa.types.is_string(arr_type):
-        return list(map(CString, arr.to_pandas()))
+        return list(map(str, arr.to_pandas()))
 
     if (
         pa.types.is_list(arr_type) or pa.types.is_large_list(arr_type)
@@ -114,13 +113,7 @@ def init_parquet_dataset(
     filters: Optional[pa.dataset.Expression] = None,
     filesystem: Optional[pa.fs.FileSystem] = None,
 ) -> pq.ParquetDataset:
-    source_ds = pq.ParquetDataset(
-        parquet_path,
-        validate_schema=True,
-        filters=filters,
-        filesystem=filesystem,
-    )
-    return source_ds
+    return pq.ParquetDataset(parquet_path, filters=filters, filesystem=filesystem)
 
 
 def get_dataset_fragments(
@@ -273,7 +266,7 @@ def list_parquet_fragments(
     split_to_row_groups: bool = True,
     filesystem: Optional[pa.fs.FileSystem] = None,
     shuffle_window: Optional[int] = None,
-    seed: Optional[int] = None,
+    seed: int = 2,
 ) -> DataPipelineBuilder:
     dataset = init_parquet_dataset(parquet_path, filters=filters, filesystem=filesystem)
     columns = columns or dataset.schema.names
@@ -284,21 +277,20 @@ def list_parquet_fragments(
 
     pipeline_builder = read_sequence(get_dataset_fragments(dataset, filters))
 
-    with torch_random_seed(seed):
-        if shuffle_window is not None:
-            # shuffle them in full memory since fragments are already known
-            pipeline_builder = pipeline_builder.shuffle(shuffle_window=0)
+    if shuffle_window is not None:
+        # shuffle them in full memory since fragments are already known
+        pipeline_builder = pipeline_builder.shuffle(shuffle_window=0, seed=seed)
 
-        if split_to_row_groups:
-            pipeline_builder = pipeline_builder.yield_from(
-                lambda fragment: read_sequence(
-                    split_fragment_in_row_groups(fragment)
-                ).and_return()
+    if split_to_row_groups:
+        pipeline_builder = pipeline_builder.yield_from(
+            lambda fragment: read_sequence(
+                split_fragment_in_row_groups(fragment)
+            ).and_return()
+        )
+        if shuffle_window is not None:
+            pipeline_builder = pipeline_builder.shuffle(
+                shuffle_window=shuffle_window, seed=seed + 1
             )
-            if shuffle_window is not None:
-                pipeline_builder = pipeline_builder.shuffle(
-                    shuffle_window=shuffle_window
-                )
 
     return pipeline_builder
 

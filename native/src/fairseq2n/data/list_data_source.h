@@ -17,24 +17,27 @@ class list_data_source final : public data_source {
 public:
     explicit
     list_data_source(data_list &&list) noexcept
-      : list_(std::move(list)), iter_{list_.begin()}
+      : list_(std::move(list)), pos_{list_.begin()}
     {}
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     data_list list_;
-    data_list::iterator iter_;
+    data_list::iterator pos_;
 };
 
 }  // namespace fairseq2n::detail

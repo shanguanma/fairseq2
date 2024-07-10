@@ -21,33 +21,38 @@ class map_data_source final : public data_source {
 public:
     explicit
     map_data_source(
-        std::unique_ptr<data_source> &&inner, map_fn &&fn, std::size_t num_parallel_calls);
+        std::unique_ptr<data_source> &&inner,
+        std::vector<map_fn> &&fns,
+        std::size_t num_parallel_calls);
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     bool
     fill_buffer();
 
     std::optional<data>
-    invoke_function(data &&example);
+    invoke_function(data &&example, std::size_t fn_idx);
 
 private:
     std::unique_ptr<data_source> inner_;
-    map_fn map_fn_;
+    std::vector<map_fn> map_fns_;
     std::size_t num_parallel_calls_;
     std::vector<std::optional<data>> buffer_{};
-    std::vector<std::optional<data>>::iterator buffer_iter_{};
+    std::vector<std::optional<data>>::iterator buffer_pos_{};
 };
 
 }  // namespace fairseq2n::detail

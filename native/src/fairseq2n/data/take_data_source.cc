@@ -22,27 +22,33 @@ take_data_source::next()
 }
 
 void
-take_data_source::reset()
+take_data_source::reset(bool reset_rng)
 {
     num_examples_read_ = 0;
 
-    inner_->reset();
+    inner_->reset(reset_rng);
 }
 
 void
-take_data_source::record_position(tape &t) const
+take_data_source::record_position(tape &t, bool strict) const
 {
     t.record(num_examples_read_);
 
-    inner_->record_position(t);
+    inner_->record_position(t, strict);
 }
 
 void
-take_data_source::reload_position(tape &t)
+take_data_source::reload_position(tape &t, bool strict)
 {
     num_examples_read_ = t.read<std::size_t>();
 
-    inner_->reload_position(t);
+    inner_->reload_position(t, strict);
+}
+
+data_source_finitude_type
+take_data_source::finitude_type() const noexcept
+{
+    return data_source_finitude_type::finite;
 }
 
 }  // namespace fairseq2n::detail

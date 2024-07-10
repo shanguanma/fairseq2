@@ -13,28 +13,38 @@ namespace fairseq2n::detail {
 std::optional<data>
 count_data_source::next()
 {
-    if (key_)
-        return data_dict{{*key_, counter_++}};
+    std::int64_t output = counter_;
 
-    return counter_++;
+    counter_ += step_;
+
+    if (maybe_key_)
+        return data_dict{{*maybe_key_, output}};
+
+    return output;
 }
 
 void
-count_data_source::reset()
+count_data_source::reset(bool)
 {
     counter_ = start_;
 }
 
 void
-count_data_source::record_position(tape &t) const
+count_data_source::record_position(tape &t, bool) const
 {
     t.record(counter_);
 }
 
 void
-count_data_source::reload_position(tape &t)
+count_data_source::reload_position(tape &t, bool)
 {
     counter_ = t.read<std::int64_t>();
+}
+
+data_source_finitude_type
+count_data_source::finitude_type() const noexcept
+{
+    return data_source_finitude_type::pseudo_infinite;
 }
 
 }

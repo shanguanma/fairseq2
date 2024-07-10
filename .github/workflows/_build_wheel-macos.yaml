@@ -15,7 +15,7 @@ on:
         required: true
       arch:
         type: string
-        default: 'x86_64'
+        default: 'arm64'
       artifacts_name:
         type: string
         default: 'wheels'
@@ -23,10 +23,13 @@ on:
         type: string
         default: ''
 
+env:
+    ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
   build:
     name: Build
-    runs-on: macos-12
+    runs-on: macos-14
     steps:
       - name: Check-out the repository
         uses: actions/checkout@v3
@@ -40,7 +43,7 @@ jobs:
           brew install libsndfile python@${{ inputs.py }} || true
       - name: Create the Python virtual environment
         run: |
-          /usr/local/bin/python${{ inputs.py }} -m venv ~/venv
+          $(brew --prefix python@${{ inputs.py }})/bin/python${{ inputs.py }} -m venv ~/venv
 
           echo ~/venv/bin >> "$GITHUB_PATH"
       - name: Install PyTorch
@@ -83,7 +86,7 @@ jobs:
       - name: Upload wheels and native tests to staging
         uses: actions/upload-artifact@v3
         with:
-          name: ${{ inputs.artifacts_name }}-pt${{ inputs.torch }}-py${{ inputs.py }}-macos_${{ inputs.arch }}-cpu
+          name: ${{ inputs.artifacts_name }}-pt${{ inputs.torch }}-py${{ inputs.py }}-macos_${{ inputs.arch }}-cpu-nosan
           path: |
             build/wheelhouse/*.whl
             native/build/tests/run-tests
@@ -93,7 +96,7 @@ jobs:
   test:
     name: Test
     needs: build
-    runs-on: macos-12
+    runs-on: macos-14
     steps:
       - name: Install system dependencies
         env:
@@ -104,13 +107,13 @@ jobs:
       - name: Download wheels and native tests from staging
         uses: actions/download-artifact@v3
         with:
-          name: ${{ inputs.artifacts_name }}-pt${{ inputs.torch }}-py${{ inputs.py }}-macos_${{ inputs.arch }}-cpu
+          name: ${{ inputs.artifacts_name }}-pt${{ inputs.torch }}-py${{ inputs.py }}-macos_${{ inputs.arch }}-cpu-nosan
           path: ~/artifacts/
       - name: Check-out the repository
         uses: actions/checkout@v3
       - name: Create the Python virtual environment
         run: |
-          /usr/local/bin/python${{ inputs.py }} -m venv ~/venv
+          $(brew --prefix python@${{ inputs.py }})/bin/python${{ inputs.py }} -m venv ~/venv
 
           echo ~/venv/bin >> "$GITHUB_PATH"
       - name: Install PyTorch

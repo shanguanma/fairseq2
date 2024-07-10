@@ -21,14 +21,12 @@ target_sources(py_bindings
         data/data_pipeline.cc
         data/init.cc
         data/image.cc
-        data/string.cc
         data/text/converters.cc
         data/text/init.cc
         data/text/sentencepiece.cc
         data/text/text_reader.cc
         type_casters/data.cc
         type_casters/map_fn.cc
-        type_casters/string.cc
         type_casters/torch.cc
 )
 
@@ -38,7 +36,7 @@ target_include_directories(py_bindings PRIVATE ${PROJECT_SOURCE_DIR}/python/src)
 
 target_link_libraries(py_bindings
     PRIVATE
-        pybind11::module fmt::fmt kuba-zip fairseq2n torch_python
+        pybind11::module fmt::fmt kuba-zip fairseq2n torch torch_python
 )
 
 fairseq2n_set_link_options(py_bindings ALLOW_UNDEFINED_SYMBOLS)
@@ -76,7 +74,8 @@ if(FAIRSEQ2N_INSTALL_STANDALONE)
                 fairseq2n
             APPEND PROPERTY
                 INSTALL_RPATH
-                    ${rpath_origin}/../nvidia/cuda_runtime/lib)
+                    ${rpath_origin}/../../nvidia/cuda_runtime/lib
+	)
     endif()
 endif()
 

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,19 +23,22 @@ namespace fairseq2n::detail {
 class zip_file_data_source final : public data_source {
 public:
     explicit
-    zip_file_data_source(std::string &&pathname);
+    zip_file_data_source(std::filesystem::path &&path);
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     memory_block
@@ -47,7 +51,7 @@ private:
     throw_read_failure();
 
 private:
-    std::string pathname_;
+    std::filesystem::path path_;
     zip_t* zip_reader_;
     std::size_t num_entries_;
     std::size_t num_files_read_ = 0;

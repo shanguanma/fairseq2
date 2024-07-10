@@ -40,21 +40,27 @@ bucket_data_source::next()
 }
 
 void
-bucket_data_source::reset()
+bucket_data_source::reset(bool reset_rng)
 {
-    inner_->reset();
+    inner_->reset(reset_rng);
 }
 
 void
-bucket_data_source::record_position(tape &t) const
+bucket_data_source::record_position(tape &t, bool strict) const
 {
-    inner_->record_position(t);
+    inner_->record_position(t, strict);
 }
 
 void
-bucket_data_source::reload_position(tape &t)
+bucket_data_source::reload_position(tape &t, bool strict)
 {
-    inner_->reload_position(t);
+    inner_->reload_position(t, strict);
+}
+
+data_source_finitude_type
+bucket_data_source::finitude_type() const noexcept
+{
+    return inner_->finitude_type();
 }
 
 }  // namespace fairseq2n::detail

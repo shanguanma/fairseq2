@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from typing import Tuple
 
 import pytest
 
-from fairseq2.data import DataPipeline, read_sequence
+from fairseq2.data import DataPipeline, DataPipelineError, read_sequence
 
 
 class TestYieldFromOp:
@@ -27,6 +29,18 @@ class TestYieldFromOp:
 
             pipeline.reset()
 
+    def test_op_raises_error_when_yield_from_is_infinite(self) -> None:
+        def fn(d: int) -> DataPipeline:
+            return DataPipeline.constant(0).and_return()
+
+        pipeline = read_sequence([1]).yield_from(fn).and_return()
+
+        with pytest.raises(
+            DataPipelineError,
+            match=r"^The data pipeline to yield from cannot be infinite\.$",
+        ):
+            next(iter(pipeline))
+
     def test_op_saves_and_restores_its_state(self) -> None:
         def fn(d: Tuple[int, int]) -> DataPipeline:
             a, b = d
@@ -41,7 +55,7 @@ class TestYieldFromOp:
 
         it = iter(pipeline)
 
-        # Move the the second example.
+        # Move to the second example.
         for _ in range(2):
             d = next(it)
 

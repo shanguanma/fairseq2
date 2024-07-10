@@ -7,31 +7,35 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional, Tuple, final
 
 import torch
 from torch import Tensor
-from torch.nn import Module
 from torch.nn.functional import log_softmax
 
 from fairseq2.data import VocabularyInfo
+from fairseq2.models.model import Model
 from fairseq2.nn.functional import nll_loss
 from fairseq2.nn.padding import PaddingMask
 
 
-class SequenceModel(Module, ABC):
+class SequenceModel(Model, ABC):
     """Represents a sequence model."""
 
+    max_seq_len: int
     vocab_info: VocabularyInfo
 
-    def __init__(self, vocab_info: VocabularyInfo) -> None:
+    def __init__(self, max_seq_len: int, vocab_info: VocabularyInfo) -> None:
         """
+        :param max_seq_len:
+            The maximum length of sequences produced by the model.
         :param vocab_info:
             The vocabulary information of sequences produced by the model.
         """
         super().__init__()
 
+        self.max_seq_len = max_seq_len
         self.vocab_info = vocab_info
 
     @abstractmethod
@@ -42,6 +46,7 @@ class SequenceModel(Module, ABC):
         """
 
 
+@final
 @dataclass
 class SequenceBatch:
     """Represents a sequence batch."""
@@ -52,25 +57,78 @@ class SequenceBatch:
     sequence-specific dimensions including none."""
 
     padding_mask: Optional[PaddingMask]
-    """The padding mask of ``seqs``. *Shape:* :math:`(N,S)`, where :math:`N` is
-    the batch size and :math:`S` is the sequence length."""
+    """The padding mask of :attr:`seqs`. *Shape:* :math:`(N,S)`, where :math:`N`
+    is the batch size and :math:`S` is the sequence length."""
+
+    target_mask: Optional[Tensor] = None
+    """The mask specifying the elements in ``seqs`` that should be treated as
+    targets during model training or validation. *Shape:* :math:`(N,S)`, where
+    :math:`N` is the batch size and :math:`S` is the sequence length."""
 
     example: Any = None
     """The data example from which this batch was constructed."""
 
     @property
     def batch_size(self) -> int:
-        """The size of the batch."""
+        """The size of the batch dimension."""
         return self.seqs.size(0)
 
-    def compute_num_tokens(self) -> Tensor:
-        """Compute the number of tokens in this batch."""
+    def num_elements(self) -> int:
+        """Return the number of elements in the batch."""
         if self.padding_mask is None:
-            return torch.full((), self.seqs.numel(), device=self.seqs.device)
+            return self.seqs.numel()
 
-        return self.padding_mask.seq_lens.sum()
+        return int(self.padding_mask.seq_lens.sum())
+
+    def num_target_elements(self) -> int:
+        """Return the number of target elements in the batch."""
+        if self.target_mask is not None:
+            return int(self.target_mask.sum())
+
+        return self.num_elements()
 
 
+def as_auto_regressive_input(
+    batch: SequenceBatch,
+) -> Tuple[SequenceBatch, SequenceBatch]:
+    """Use ``batch`` to train an auto-regressive model.
+
+    :returns:
+        The tuple of input and target batches.
+    """
+    if (seq_len := batch.seqs.size(1)) < 2:
+        raise ValueError(
+            f"The sequence length of `batch.seqs` must be at least 2 for training, but is {seq_len} instead."
+        )
+
+    seqs, targets = batch.seqs[:, :-1], batch.seqs[:, 1:]
+
+    if batch.padding_mask is None:
+        padding_mask = None
+    else:
+        padding_mask = batch.padding_mask.trim(1)
+
+    if batch.target_mask is None:
+        seqs_target_mask, target_mask = None, None
+    else:
+        seqs_target_mask, target_mask = (
+            batch.target_mask[:, :-1], batch.target_mask[:, 1:]  # fmt: skip
+        )
+
+    batch = SequenceBatch(seqs, padding_mask, seqs_target_mask, batch.example)
+
+    target_batch = SequenceBatch(targets, padding_mask, target_mask)
+
+    return batch, target_batch
+
+
+# compat
+@dataclass
+class BCVocabInfo:
+    pad_idx: Optional[int] = None
+
+
+@final
 @dataclass
 class SequenceModelOutput:
     """Holds the output of a sequence model."""
@@ -80,26 +138,41 @@ class SequenceModelOutput:
     :math:`N` is the batch size, :math:`S` is the sequence length, and :math:`T`
     is the size of the vocabulary."""
 
-    vocab_info: VocabularyInfo
-    """The vocabulary information."""
+    pad_idx: Optional[int]
+    """The index of the PAD symbols in the vocabulary."""
+
+    # compat
+    vocab_info: BCVocabInfo = field(default_factory=BCVocabInfo)
+
+    # compat
+    def __post_init__(self) -> None:
+        self.vocab_info.pad_idx = self.pad_idx
 
     def compute_loss(
         self,
         targets: Tensor,
         *,
+        loss_mask: Optional[Tensor] = None,
         ignore_prefix_size: int = 0,
         label_smoothing: float = 0.0,
     ) -> Tensor:
-        """Compute the negative log-likelihood loss.
+        """Compute the NLL (negative log-likelihood) loss.
 
         :param targets:
             The target indices. *Shape:* :math:`(N,S)`, where :math:`N` is the
             batch size and :math:`S` is the sequence length.
+        :param loss_mask:
+            The loss mask that specifies the elements in ``targets`` that should
+            be used in the loss computation. All non-masked elements will be
+            ignored. *Shape:* Same as ``targets``.
         :param ignore_prefix_size:
             The number of steps from the beginning of the sequence that should
             be ignored in the loss computation.
         :param label_smoothing:
             The amount of label smoothing to apply while computing the loss.
+
+        :returns:
+            A scalar tensor representing the summed NLL loss.
         """
         if ignore_prefix_size > 0:
             logits = self.logits[:, ignore_prefix_size:, :]
@@ -110,8 +183,23 @@ class SequenceModelOutput:
             targets = targets[:, ignore_prefix_size:]
 
         # For numerical stability run in single precision.
+        # (N, S, T)
         lprobs = log_softmax(logits, dim=-1, dtype=torch.float32)
 
-        return nll_loss(
-            lprobs, targets, self.vocab_info.pad_idx, label_smoothing=label_smoothing
+        # sum: (), none: (N, S)
+        loss = nll_loss(
+            lprobs,
+            targets,
+            self.pad_idx,
+            label_smoothing=label_smoothing,
+            reduction="sum" if loss_mask is None else "none",
         )
+
+        if loss_mask is None:
+            return loss
+
+        if ignore_prefix_size > 0:
+            loss_mask = loss_mask[:, ignore_prefix_size:]
+
+        # ()
+        return (loss * loss_mask).sum()

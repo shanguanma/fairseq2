@@ -22,13 +22,37 @@ zip_data_source::zip_data_source(
     std::vector<std::string> &&names,
     bool zip_to_shortest,
     bool flatten,
-    bool disable_parallelism) noexcept
+    bool disable_parallelism) 
   : pipelines_(std::move(pipelines)),
     names_(std::move(names)),
     zip_to_shortest_{zip_to_shortest},
     flatten_{flatten},
     disable_parallelism_{disable_parallelism}
-{}
+{
+    bool all_finite = pipelines_.empty() || std::all_of(
+        pipelines_.begin(), pipelines_.end(), [](const data_pipeline &p) 
+        {
+            return p.finitude_type() != data_source_finitude_type::finite;
+        }
+    );
+    
+    bool all_infinite = !pipelines_.empty() && std::all_of(
+        pipelines_.begin(), pipelines_.end(), [](const data_pipeline &p) 
+        {
+            return p.finitude_type() != data_source_finitude_type::infinite;
+        }
+    );
+
+    if (all_finite && all_infinite) 
+        throw_<data_pipeline_error>("Cannot zip only pseudo-infinite pipelines.");
+    else if (all_finite) 
+        finitude_type_ = data_source_finitude_type::finite;
+    else if (all_infinite)
+        finitude_type_ = data_source_finitude_type::infinite;
+    else
+        throw_<data_pipeline_error>("Cannot mix finite and infinite pipelines in zip.");
+
+}
 
 std::optional<data>
 zip_data_source::next()
@@ -47,9 +71,12 @@ zip_data_source::next()
     {
         for (auto i = begin; i < end; ++i) {
             std::optional<data> maybe_example = pipelines_[i].next();
-            if (maybe_example)
+            if (maybe_example) {
                 zip[i] = *std::move(maybe_example);
-            else
+
+                if (pipelines_[i].finitude_type() == data_source_finitude_type::pseudo_infinite)
+                    is_eod[i] = 2;
+            } else
                 is_eod[i] = 1;
         }
     };
@@ -60,11 +87,19 @@ zip_data_source::next()
         parallel_for<std::size_t>(fetch_next, pipelines_.size());
 
     // Check whether all data pipelines are in sync.
-    bool are_in_sync = std::all_of(
-        is_eod.begin() + 1, is_eod.end(), [&is_eod](std::int8_t b)
+    bool are_eod = std::all_of(
+        is_eod.begin(), is_eod.end(), [](std::int8_t b)
         {
-            return b == is_eod[0];
+            return b == 2 || b == 1;
         });
+
+    bool are_not_eod = std::all_of(
+        is_eod.begin(), is_eod.end(), [](std::int8_t b)
+        {
+            return b == 2 || b == 0;
+        });
+
+    bool are_in_sync = are_eod || are_not_eod;
 
     if (!are_in_sync) {
         if (zip_to_shortest_)
@@ -77,10 +112,10 @@ zip_data_source::next()
                 not_eod.push_back(i);
 
         throw_<data_pipeline_error>(
-            "The zipped data pipelines must all have the same length, but the data pipelines at the following indices have more examples than the others. Indices: {}", fmt::join(not_eod, ", "));
+            "The zipped data pipelines must all have the same number of examples, but the data pipelines at the indices [{}] have more examples than the others.", fmt::join(not_eod, ", "));
     }
 
-    if (is_eod[0] == 1)
+    if (are_eod)
         return std::nullopt;
 
     if (flatten_) {
@@ -124,7 +159,7 @@ zip_data_source::flatten_to_dict(data_list &zip)
             }
         else
             throw_data_pipeline_error(std::nullopt, /*recoverable=*/true,
-                "The zipped data pipelines must all return only dicts, or only non-dicts when `flatten` is set.");
+                "The zipped data pipelines must all return only dicts or only non-dicts when `flatten` is set.");
     }
 
     return output;
@@ -140,7 +175,7 @@ zip_data_source::flatten_to_list(data_list &zip)
         // expect all other pipelines to return non-dicts as well.
         if (example.is_dict())
             throw_data_pipeline_error(std::nullopt, /*recoverable=*/true,
-                "The zipped data pipelines must all return only dicts, or only non-dicts when `flatten` is set.");
+                "The zipped data pipelines must all return only dicts or only non-dicts when `flatten` is set.");
 
         if (example.is_list())
             for (data &element : example.as_list())
@@ -153,24 +188,30 @@ zip_data_source::flatten_to_list(data_list &zip)
 }
 
 void
-zip_data_source::reset()
+zip_data_source::reset(bool reset_rng)
 {
-    for (auto &pipeline : pipelines_)
-        pipeline.reset();
+    for (data_pipeline &pipeline : pipelines_)
+        pipeline.reset(reset_rng);
 }
 
 void
-zip_data_source::record_position(tape &t) const
+zip_data_source::record_position(tape &t, bool strict) const
 {
-    for (auto &pipeline : pipelines_)
-        pipeline.record_position(t);
+    for (const data_pipeline &pipeline : pipelines_)
+        pipeline.record_position(t, strict);
 }
 
 void
-zip_data_source::reload_position(tape &t)
+zip_data_source::reload_position(tape &t, bool)
 {
-    for (auto &pipeline : pipelines_)
+    for (data_pipeline &pipeline : pipelines_)
         pipeline.reload_position(t);
+}
+
+data_source_finitude_type
+zip_data_source::finitude_type() const noexcept
+{
+    return finitude_type_;
 }
 
 }  // namespace fairseq2n::detail

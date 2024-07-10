@@ -13,6 +13,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -120,9 +121,10 @@ data_pipeline_tracker::delete_alive_pipelines()
     for (auto &weakref : alive_pipelines_) {
         py::object pipeline_obj = weakref();
 
+        // If the pipeline has a cyclic reference during interpreter shutdown,
+        // GC skips calling its weakref callback; so this check can be true.
         if (pipeline_obj.is_none())
-            throw_<internal_error>(
-                "One of the tracked data pipelines has already been deleted. Please file a bug report.");
+            continue;
 
         auto &pipeline = pipeline_obj.cast<data_pipeline &>();
 
@@ -215,35 +217,48 @@ def_data_pipeline(py::module_ &data_module)
             },
             py::keep_alive<0, 1>{})
 
-        .def("reset", &data_pipeline::reset, py::call_guard<py::gil_scoped_release>{})
+        .def(
+            "reset",
+            &data_pipeline::reset,
+            py::arg("reset_rng") = false,
+            py::call_guard<py::gil_scoped_release>{})
+
+        .def("finitude_type", &data_pipeline::finitude_type)
 
         .def_property_readonly("is_broken", &data_pipeline::is_broken)
 
         // state_dict
         .def(
             "state_dict",
-            [](const data_pipeline &self)
+            [](const data_pipeline &self, bool strict)
             {
                 tape t{};
 
                 {
                     py::gil_scoped_release no_gil{};
 
-                    self.record_position(t);
+                    self.record_position(t, strict);
                 }
 
                 return py::dict{py::arg("position") = py::cast(t.storage())};
-            })
+            },
+            py::arg("strict") = true)
         .def(
             "load_state_dict",
-            [](data_pipeline &self, const py::dict &state_dict, bool strict)
+            [](data_pipeline &self, const py::dict &state_dict)
             {
+                auto throw_invalid_arg = []()
+                {
+                    throw_<std::invalid_argument>(
+                        "`state_dict` must contain a valid data pipeline state, but cannot be parsed as such.");
+                };
+
                 py::object value;
                 try {
                     value = state_dict["position"];
                 } catch (const py::error_already_set &ex) {
-                    if (ex.matches(PyExc_KeyError) && !strict)
-                        return;
+                    if (ex.matches(PyExc_KeyError))
+                        throw_invalid_arg();
 
                     throw;
                 }
@@ -252,22 +267,98 @@ def_data_pipeline(py::module_ &data_module)
                 try {
                     storage = value.cast<data_list>();
                 } catch (const py::cast_error &) {
-                    throw_<std::invalid_argument>(
-                        "`state_dict` must contain a valid data pipeline state, but cannot be parsed as such.");
+                    throw_invalid_arg();
                 }
 
                 tape t{std::move(storage)};
 
-                {
+                try {
                     py::gil_scoped_release no_gil{};
 
                     self.reload_position(t);
+                } catch (const std::invalid_argument &) {
+                    throw_invalid_arg();
                 }
+
+                if (!t.is_eod())
+                    throw_invalid_arg();
             },
-            py::arg("state_dict"),
-            py::arg("strict") = true)
+            py::arg("state_dict"))
 
         // Factories
+        .def_static(
+            "concat",
+            [](std::vector<std::reference_wrapper<data_pipeline>> &refs)
+            {
+                std::vector<data_pipeline> pipelines{};
+
+                pipelines.reserve(refs.size());
+
+                std::transform(
+                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
+                        return std::move(r.get());
+                    });
+
+                return data_pipeline::concat(std::move(pipelines));
+            },
+            py::arg("pipelines"))
+        .def_static(
+            "constant",
+            [](data example, std::optional<std::string> maybe_key)
+            {
+                return data_pipeline::constant(std::move(example), std::move(maybe_key));
+            },
+            py::arg("example"),
+            py::arg("key") = std::nullopt)
+        .def_static(
+            "count",
+            [](std::int64_t start, std::int64_t step, std::optional<std::string> maybe_key)
+            {
+                return data_pipeline::count(start, step, std::move(maybe_key));
+            },
+            py::arg("start") = 0,
+            py::arg("step") = 1,
+            py::arg("key") = std::nullopt)
+        .def_static(
+            "round_robin",
+            [](
+                std::vector<std::reference_wrapper<data_pipeline>> &refs, bool stop_at_shortest)
+            {
+                std::vector<data_pipeline> pipelines{};
+
+                pipelines.reserve(refs.size());
+
+                std::transform(
+                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
+                        return std::move(r.get());
+                    });
+
+                return data_pipeline::round_robin(std::move(pipelines), stop_at_shortest);
+            },
+            py::arg("pipelines"),
+            py::arg("stop_at_shortest") = false)
+        .def_static(
+            "sample",
+            [](
+                std::vector<std::reference_wrapper<data_pipeline>> &refs,
+                std::optional<std::vector<float>> maybe_weights,
+                std::optional<std::uint64_t> maybe_seed)
+            {
+                std::vector<data_pipeline> pipelines{};
+
+                pipelines.reserve(refs.size());
+
+                std::transform(
+                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
+                        return std::move(r.get());
+                    });
+
+                return data_pipeline::sample(
+                    std::move(pipelines), std::move(maybe_weights), maybe_seed);
+            },
+            py::arg("pipelines"),
+            py::arg("weights") = std::nullopt,
+            py::arg("seed") = std::nullopt)
         .def_static(
             "zip",
             [](
@@ -301,81 +392,8 @@ def_data_pipeline(py::module_ &data_module)
             py::arg("names") = std::nullopt,
             py::arg("zip_to_shortest") = false,
             py::arg("flatten") = false,
-            py::arg("disable_parallelism") = false)
-        .def_static(
-            "round_robin",
-            [](
-                std::vector<std::reference_wrapper<data_pipeline>> &refs,
-                bool stop_at_shortest)
-            {
-                std::vector<data_pipeline> pipelines{};
+            py::arg("disable_parallelism") = false);
 
-                pipelines.reserve(refs.size());
-
-                std::transform(
-                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
-                        return std::move(r.get());
-                    });
-
-                return data_pipeline::round_robin(std::move(pipelines), stop_at_shortest);
-            },
-            py::arg("pipelines"),
-            py::arg("stop_at_shortest") = false)
-        .def_static(
-            "sample",
-            [](
-                std::vector<std::reference_wrapper<data_pipeline>> &refs,
-                std::optional<std::vector<float>> weights,
-                bool stop_at_shortest)
-            {
-                std::vector<data_pipeline> pipelines{};
-
-                pipelines.reserve(refs.size());
-
-                std::transform(
-                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
-                        return std::move(r.get());
-                    });
-
-                return data_pipeline::sample(
-                    std::move(pipelines), std::move(weights), stop_at_shortest);
-            },
-            py::arg("pipelines"),
-            py::arg("weights") = std::nullopt,
-            py::arg("stop_at_shortest") = false)
-        .def_static(
-            "constant",
-            [](data example, std::optional<std::string> key)
-            {
-                return data_pipeline::constant(std::move(example), std::move(key));
-            },
-            py::arg("example"),
-            py::arg("key") = std::nullopt)
-        .def_static(
-            "count",
-            [](std::int64_t start, std::optional<std::string> key)
-            {
-                return data_pipeline::count(start, std::move(key));
-            },
-            py::arg("start") = 0,
-            py::arg("key") = std::nullopt)
-        .def_static(
-            "concat",
-            [](std::vector<std::reference_wrapper<data_pipeline>> &refs)
-            {
-                std::vector<data_pipeline> pipelines{};
-
-                pipelines.reserve(refs.size());
-
-                std::transform(
-                    refs.begin(), refs.end(), std::back_inserter(pipelines), [](auto &r) {
-                        return std::move(r.get());
-                    });
-
-                return data_pipeline::concat(std::move(pipelines));
-            },
-            py::arg("pipelines"));
-        
     // DataPipelineIterator
     py::class_<data_pipeline_iterator>(m, "_DataPipelineIterator")
         .def(
@@ -407,17 +425,26 @@ def_data_pipeline(py::module_ &data_module)
                 data_pipeline_builder &self,
                 std::vector<std::pair<std::size_t, std::size_t>> bucket_sizes,
                 std::optional<std::string> maybe_selector,
+                std::size_t min_data_len,
+                bool skip_below_min_examples,
+                bool skip_above_max_examples,
                 bool drop_remainder) -> data_pipeline_builder &
             {
                 self = std::move(self).bucket_by_length(
                     std::move(bucket_sizes),
                     data_length_extractor{std::move(maybe_selector)},
+                    min_data_len,
+                    skip_below_min_examples,
+                    skip_above_max_examples,
                     drop_remainder);
 
                 return self;
             },
             py::arg("bucket_sizes"),
             py::arg("selector") = std::nullopt,
+            py::arg("min_data_len") = 1,
+            py::arg("skip_below_min_examples") = false,
+            py::arg("skip_above_max_examples") = false,
             py::arg("drop_remainder") = false)
         .def(
             "collate",
@@ -437,7 +464,7 @@ def_data_pipeline(py::module_ &data_module)
 
                 map_fn f = collater(opts, std::move(opt_overrides));
 
-                self = std::move(self).map(std::move(f), num_parallel_calls);
+                self = std::move(self).map(f, num_parallel_calls);
 
                 return self;
             },
@@ -445,6 +472,30 @@ def_data_pipeline(py::module_ &data_module)
             py::arg("pad_to_multiple") = 1,
             py::arg("overrides") = std::nullopt,
             py::arg("num_parallel_calls") = 1)
+        .def(
+            "dynamic_bucket",
+            [](
+                data_pipeline_builder &self,
+                float64 threshold,
+                cost_fn fn,
+                std::optional<std::size_t> maybe_min_num_examples,
+                std::optional<std::size_t> maybe_max_num_examples,
+                bool drop_remainder) -> data_pipeline_builder &
+            {
+                self = std::move(self).dynamic_bucket(
+                    threshold,
+                    std::move(fn),
+                    maybe_min_num_examples,
+                    maybe_max_num_examples,
+                    drop_remainder);
+
+                return self;
+            },
+            py::arg("threshold"),
+            py::arg("fn"),
+            py::arg("min_num_examples") = std::nullopt,
+            py::arg("max_num_examples") = std::nullopt,
+            py::arg("drop_remainder") = false)
         .def(
             "filter",
             [](data_pipeline_builder &self, predicate_fn fn) -> data_pipeline_builder &
@@ -479,7 +530,7 @@ def_data_pipeline(py::module_ &data_module)
 
                 element_mapper mapper{std::move(f), std::move(maybe_selector)};
 
-                self = std::move(self).map(std::move(mapper), num_parallel_calls);
+                self = std::move(self).map(mapper, num_parallel_calls);
 
                 return self;
             },
@@ -496,33 +547,46 @@ def_data_pipeline(py::module_ &data_module)
             },
             py::arg("num_examples"))
         .def(
+            "repeat",
+            [](
+                data_pipeline_builder &self,
+                std::optional<std::size_t> num_repeats,
+                bool reset_rng) -> data_pipeline_builder &
+            {
+                self = std::move(self).repeat(num_repeats, reset_rng);
+
+                return self;
+            },
+            py::arg("num_repeats") = std::nullopt,
+            py::arg("reset_rng") = false)
+        .def(
             "shard",
             [](
                 data_pipeline_builder &self,
                 std::size_t shard_idx,
-                std::size_t num_shards) -> data_pipeline_builder &
+                std::size_t num_shards,
+                bool allow_uneven) -> data_pipeline_builder &
             {
-                self = std::move(self).shard(shard_idx, num_shards);
+                self = std::move(self).shard(shard_idx, num_shards, allow_uneven);
 
                 return self;
             },
             py::arg("shard_idx"),
-            py::arg("num_shards"))
+            py::arg("num_shards"),
+            py::arg("allow_uneven") = false)
         .def(
             "shuffle",
             [](
                 data_pipeline_builder &self,
                 std::size_t shuffle_window,
-                bool strict,
-                bool enabled) -> data_pipeline_builder &
+                std::optional<std::uint64_t> maybe_seed) -> data_pipeline_builder &
             {
-                self = std::move(self).shuffle(shuffle_window, strict, enabled);
+                self = std::move(self).shuffle(shuffle_window, maybe_seed);
 
                 return self;
             },
             py::arg("shuffle_window"),
-            py::arg("strict") = true,
-            py::arg("enabled") = true)
+            py::arg("seed") = std::nullopt)
         .def(
             "skip",
             [](data_pipeline_builder &self, std::size_t num_examples) -> data_pipeline_builder &
@@ -579,11 +643,11 @@ def_data_pipeline(py::module_ &data_module)
 
 
     // DataPipeline Factories
-    m.def("list_files", &list_files, py::arg("pathname"), py::arg("pattern") = std::nullopt);
+    m.def("list_files", &list_files, py::arg("path"), py::arg("pattern") = std::nullopt);
 
     m.def("read_sequence", &read_list, py::arg("seq"));
 
-    m.def("read_zipped_records", &read_zipped_records, py::arg("pathname"));
+    m.def("read_zipped_records", &read_zipped_records, py::arg("path"));
 
     // Collater
     py::class_<collate_options_override>(m, "CollateOptionsOverride")
@@ -646,7 +710,7 @@ def_data_pipeline(py::module_ &data_module)
     // FileMapper
     py::class_<file_mapper, std::shared_ptr<file_mapper>>(m, "FileMapper")
         .def(
-            py::init<std::optional<std::string>, std::optional<std::size_t>>(),
+            py::init<std::optional<std::filesystem::path>, std::optional<std::size_t>>(),
             py::arg("root_dir") = std::nullopt,
             py::arg("cached_fd_count") = std::nullopt)
         .def("__call__", &file_mapper::operator(), py::call_guard<py::gil_scoped_release>{});

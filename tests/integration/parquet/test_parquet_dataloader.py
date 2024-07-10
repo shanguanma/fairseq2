@@ -19,18 +19,15 @@ try:
     import pandas as pd
     import pyarrow as pa
     import pyarrow.parquet as pq
-
-    arrow_found = True
-
     from numpy.typing import NDArray
 
-    from recipes.parquet.parquet_dataloader import (
+    from fairseq2.data.parquet.dataloader import (
         ParquetBasicDataloaderConfig,
         ParquetBatchFormat,
         parquet_iterator,
     )
 except ImportError:
-    arrow_found = False
+    pytest.skip("arrow not found", allow_module_level=True)
 
 
 def gen_random_string(length: int) -> str:
@@ -99,7 +96,6 @@ def multi_partition_file() -> Generator[str, None, None]:
     shutil.rmtree(tmpdir)
 
 
-@pytest.mark.skipif(not arrow_found, reason="arrow not found")
 class TestParquetDataloader:
     def test_simple_dataload(self, multi_partition_file: str) -> None:
         config = ParquetBasicDataloaderConfig(
@@ -170,7 +166,7 @@ class TestParquetDataloader:
 
         assert list(res[0].columns) == ["string_col2", "list_int_col", "float_col"]
 
-        assert Counter(map(len, res)) == Counter({3: 339, 1: 3, 2: 1})
+        assert Counter(map(len, res)) == Counter({3: 340, 2: 1})
 
     def test_filtered_with_columns_dataload_min_batch_size(
         self, multi_partition_file: str
@@ -186,7 +182,7 @@ class TestParquetDataloader:
             output_format=ParquetBatchFormat.pandas,
         )
         res = list(parquet_iterator(config))
-        assert Counter(map(len, res)) == Counter({3: 339})
+        assert Counter(map(len, res)) == Counter({3: 340})
 
     def test_ordered_dataload(self, multi_partition_file: str) -> None:
         config = ParquetBasicDataloaderConfig(

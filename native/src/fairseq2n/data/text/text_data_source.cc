@@ -22,8 +22,9 @@
 
 namespace fairseq2n::detail {
 
-text_data_source::text_data_source(std::string &&pathname, text_options &&opts)
-  : pathname_{std::move(pathname)}, opts_{std::move(opts)}
+text_data_source::text_data_source(
+    std::filesystem::path &&path, std::optional<std::string> &&maybe_key, text_options &&opts)
+  : path_{std::move(path)}, maybe_key_{std::move(maybe_key)}, opts_{std::move(opts)}
 {
     try {
         line_reader_ = make_text_line_reader();
@@ -54,11 +55,14 @@ text_data_source::next()
     if (opts_.rtrim())
         output = rtrim(output);
 
+    if (maybe_key_)
+        return data_dict{{*maybe_key_, std::move(output)}};
+
     return output;
 }
 
 void
-text_data_source::reset()
+text_data_source::reset(bool)
 {
     try {
         line_reader_->reset();
@@ -70,20 +74,26 @@ text_data_source::reset()
 }
 
 void
-text_data_source::record_position(tape &t) const
+text_data_source::record_position(tape &t, bool) const
 {
     t.record(num_lines_read_);
 }
 
 void
-text_data_source::reload_position(tape &t)
+text_data_source::reload_position(tape &t, bool)
 {
     auto num_lines_read = t.read<std::size_t>();
 
-    reset();
+    reset(false);
 
     for (std::size_t i = 0; i < num_lines_read; ++i)
         read_next_line();
+}
+
+data_source_finitude_type
+text_data_source::finitude_type() const noexcept
+{
+    return data_source_finitude_type::finite;
 }
 
 std::unique_ptr<text_line_reader>
@@ -96,7 +106,7 @@ text_data_source::make_text_line_reader()
     auto opts = text_file_options(opts_.maybe_encoding())
         .memory_map(opts_.memory_map()).maybe_block_size(std::max(chunk_size, min_chunk_size));
 
-    std::unique_ptr<byte_stream> stream = open_file(pathname_, opts);
+    std::unique_ptr<byte_stream> stream = open_file(path_, opts);
 
     return std::make_unique<text_line_reader>(std::move(stream), opts_.line_ending());
 }
@@ -149,7 +159,7 @@ inline void
 text_data_source::throw_read_failure()
 {
     throw_with_nested<data_pipeline_error>(
-        "The data pipeline cannot read from '{}'. See nested exception for details.", pathname_);
+        "The data pipeline cannot read from '{}'. See nested exception for details.", path_.string());
 }
 
 }  // namespace fairseq2n::detail

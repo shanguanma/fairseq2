@@ -15,7 +15,7 @@ from fairseq2.data.audio import (
     AudioDecoderOutput,
     WaveformToFbankConverter,
 )
-from fairseq2.memory import MemoryBlock
+from fairseq2.data.memory import MemoryBlock
 from tests.common import assert_equal, device
 
 TEST_OGG_PATH: Final = Path(__file__).parent.joinpath("test.ogg")
@@ -40,7 +40,7 @@ class TestWaveformToFbankConverter:
     def test_call_works_when_input_waveform_is_strided(self) -> None:
         audio = self.get_audio()
 
-        audio["waveform"] = audio["waveform"].transpose(0, 1)
+        audio["waveform"] = audio["waveform"].unsqueeze(-1).transpose(0, 1)
 
         converter = WaveformToFbankConverter()
 
@@ -132,10 +132,10 @@ class TestWaveformToFbankConverter:
 
         with pytest.raises(
             ValueError,
-            match=r"^The input sample rate must be representable in single precision \(32-bit\), but is 3\.5E\+38 instead\.$",
+            match=r"^The input sample rate must be representable in single precision \(32-bit\), but is 3\.41E\+38 instead\.$",
         ):
             converter(
-                {"waveform": torch.zeros((), device=device), "sample_rate": 3.5e38}
+                {"waveform": torch.zeros((), device=device), "sample_rate": 3.41e38}
             )
 
     def test_call_raises_error_when_sample_rate_is_less_than_100(self) -> None:
@@ -175,7 +175,7 @@ class TestWaveformToFbankConverter:
         ):
             converter({"waveform": "foo", "sample_rate": 16000.0})  # type: ignore[typeddict-item]
 
-    @pytest.mark.parametrize("shape", [(), (4,), (4, 4, 4)])
+    @pytest.mark.parametrize("shape", [(), (4, 4, 4)])
     def test_call_raises_error_when_waveform_is_not_two_dimensional(
         self, shape: Sequence[int]
     ) -> None:

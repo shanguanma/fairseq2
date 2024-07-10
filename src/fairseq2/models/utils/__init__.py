@@ -9,7 +9,6 @@ from fairseq2.models.utils.arch_registry import (
 )
 from fairseq2.models.utils.generic_loaders import ConfigLoader as ConfigLoader
 from fairseq2.models.utils.generic_loaders import ModelLoader as ModelLoader
-from fairseq2.models.utils.generic_loaders import TokenizerLoader as TokenizerLoader
 from fairseq2.models.utils.generic_loaders import (
-    TokenizerLoaderBase as TokenizerLoaderBase,
+    StandardTextTokenizerLoader as StandardTextTokenizerLoader,
 )

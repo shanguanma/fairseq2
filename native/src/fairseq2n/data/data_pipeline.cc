@@ -7,6 +7,7 @@
 #include "fairseq2n/data/data_pipeline.h"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <system_error>
 #include <utility>
@@ -18,10 +19,12 @@
 #include "fairseq2n/data/constant_data_source.h"
 #include "fairseq2n/data/count_data_source.h"
 #include "fairseq2n/data/detail/file_system.h"
+#include "fairseq2n/data/dynamic_bucket_data_source.h"
 #include "fairseq2n/data/filter_data_source.h"
 #include "fairseq2n/data/list_data_source.h"
 #include "fairseq2n/data/map_data_source.h"
 #include "fairseq2n/data/prefetch_data_source.h"
+#include "fairseq2n/data/repeat_data_source.h"
 #include "fairseq2n/data/round_robin_data_source.h"
 #include "fairseq2n/data/sample_data_source.h"
 #include "fairseq2n/data/shard_data_source.h"
@@ -77,13 +80,13 @@ data_pipeline::next()
 }
 
 void
-data_pipeline::reset()
+data_pipeline::reset(bool reset_rng)
 {
     if (is_broken_ || !source_)
         return;
 
     try {
-        source_->reset();
+        source_->reset(reset_rng);
     } catch (const std::exception &) {
         is_broken_ = true;
 
@@ -92,7 +95,7 @@ data_pipeline::reset()
 }
 
 void
-data_pipeline::record_position(tape &t) const
+data_pipeline::record_position(tape &t, bool strict) const
 {
     check_if_broken();
 
@@ -102,8 +105,10 @@ data_pipeline::record_position(tape &t) const
         if (!source_)
             return;
 
+        t.record(strict);
+
         try {
-            source_->record_position(t);
+            source_->record_position(t, strict);
         } catch (const std::exception &) {
             is_broken_ = true;
 
@@ -124,8 +129,10 @@ data_pipeline::reload_position(tape &t)
         if (!source_)
             return;
 
+        bool strict = t.read<bool>();
+
         try {
-            source_->reload_position(t);
+            source_->reload_position(t, strict);
         } catch (const std::exception &) {
             is_broken_ = true;
 
@@ -135,6 +142,19 @@ data_pipeline::reload_position(tape &t)
         reset();
 }
 
+data_source_finitude_type
+data_pipeline::finitude_type() const
+{
+    check_if_broken();
+
+    ensure_initialized();
+
+    if (!source_)
+        return data_source_finitude_type::finite;
+
+    return source_->finitude_type();
+}
+
 inline bool
 data_pipeline::is_initialized() const noexcept
 {
@@ -142,7 +162,7 @@ data_pipeline::is_initialized() const noexcept
 }
 
 void
-data_pipeline::ensure_initialized()
+data_pipeline::ensure_initialized() const
 {
     if (factory_ == nullptr)
         return;
@@ -164,6 +184,123 @@ data_pipeline::check_if_broken() const
     if (is_broken_)
         throw_<data_pipeline_error>(
             "The data pipeline is broken by a previous operation and cannot be used.");
+}
+
+data_pipeline_builder
+data_pipeline::concat(std::vector<data_pipeline> pipelines)
+{
+    bool is_broken = std::any_of(
+        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
+        {
+            return pipeline.is_broken();
+        });
+
+    if (is_broken)
+        throw_<std::invalid_argument>(
+            "At least one of the specified data pipelines is broken and cannot be concatenated.");
+
+    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
+
+    auto factory = [tmp]() mutable
+    {
+        return std::make_unique<concat_data_source>(std::move(*tmp));
+    };
+
+    return data_pipeline_builder{std::move(factory)};
+}
+
+data_pipeline_builder
+data_pipeline::constant(data example, std::optional<std::string> maybe_key)
+{
+    auto factory = [example = std::move(example), maybe_key = std::move(maybe_key)]() mutable
+    {
+        return std::make_unique<constant_data_source>(std::move(example), std::move(maybe_key));
+    };
+
+    return data_pipeline_builder{std::move(factory)};
+}
+
+data_pipeline_builder
+data_pipeline::count(std::int64_t start, std::int64_t step, std::optional<std::string> maybe_key)
+{
+    auto factory = [start, step, maybe_key = std::move(maybe_key)]() mutable
+    {
+        return std::make_unique<count_data_source>(start, step, std::move(maybe_key));
+    };
+
+    return data_pipeline_builder{std::move(factory)};
+}
+
+data_pipeline_builder
+data_pipeline::round_robin(std::vector<data_pipeline> pipelines, bool stop_at_shortest)
+{
+    bool is_broken = std::any_of(
+        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
+        {
+            return pipeline.is_broken();
+        });
+
+    if (is_broken)
+        throw_<std::invalid_argument>(
+            "At least one of the specified data pipelines is broken and cannot be used in round robin.");
+
+    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
+
+    auto factory = [tmp, stop_at_shortest]() mutable
+    {
+        return std::make_unique<round_robin_data_source>(std::move(*tmp), stop_at_shortest);
+    };
+
+    return data_pipeline_builder{std::move(factory)};
+}
+
+data_pipeline_builder
+data_pipeline::sample(
+    std::vector<data_pipeline> pipelines,
+    std::optional<std::vector<float32>> maybe_weights,
+    std::optional<std::uint64_t> maybe_seed)
+{
+    bool is_broken = std::any_of(
+        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
+        {
+            return pipeline.is_broken();
+        });
+
+    if (is_broken)
+        throw_<std::invalid_argument>(
+            "At least one of the specified data pipelines is broken and cannot be sampled.");
+
+    std::vector<float32> weights{};
+
+    if (maybe_weights)
+        weights = *maybe_weights;
+    else if (!pipelines.empty())
+        weights = std::vector<float32>(
+            pipelines.size(), 1.0F / static_cast<float32>(pipelines.size()));
+
+    if (weights.size() != pipelines.size())
+        throw_<std::invalid_argument>(
+            "The number of `pipelines` and the number of `weights` must be equal, but are {} and {} instead.", pipelines.size(), weights.size());
+
+    for (std::size_t i = 0; i < weights.size(); i++) {
+        float32 weight = weights[i];
+
+        if (weight < 0.0F || are_close(weight, 0.0F))
+            throw_<std::invalid_argument>(
+                "The `weights` must be greater than 0.0, but the weight at index {} is {} instead.", i, weight);
+
+        if (!std::isfinite(weight))
+            throw_<std::invalid_argument>(
+                "The `weights` must be finite, but the weight at index {} is infinite or NaN instead.", i);
+    }
+
+    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
+
+    auto factory = [tmp, weights=std::move(weights), maybe_seed]() mutable {
+        return std::make_unique<sample_data_source>(std::move(*tmp), std::move(weights), maybe_seed);
+    };
+
+    return data_pipeline_builder{std::move(factory)};
 }
 
 data_pipeline_builder
@@ -205,115 +342,6 @@ data_pipeline::zip(
 }
 
 data_pipeline_builder
-data_pipeline::round_robin(
-    std::vector<data_pipeline> pipelines,
-    bool stop_at_shortest)
-{
-    bool is_broken = std::any_of(
-        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
-        {
-            return pipeline.is_broken();
-        });
-
-    if (is_broken)
-        throw_<std::invalid_argument>(
-            "At least one of the specified data pipelines is broken and cannot be used in round robin.");
-
-    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
-
-    auto factory = [tmp, stop_at_shortest]() mutable
-    {
-        return std::make_unique<round_robin_data_source>(std::move(*tmp), stop_at_shortest);
-    };
-
-    return data_pipeline_builder{std::move(factory)};
-}
-
-data_pipeline_builder
-data_pipeline::sample(
-    std::vector<data_pipeline> pipelines,
-    std::optional<std::vector<float32>> weights,
-    bool stop_at_shortest)
-{
-    if (pipelines.empty())
-        throw_<std::invalid_argument>(
-            "`pipelines` does not contain any elements. Can not sample from empty set.");
-
-    bool is_broken = std::any_of(
-        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
-        {
-            return pipeline.is_broken();
-        });
-    if (is_broken)
-        throw_<std::invalid_argument>(
-            "At least one of the specified data pipelines is broken and cannot be sampled.");
-
-    if (!weights)
-        weights = std::vector<float32>(pipelines.size(), 1.0F / static_cast<float32>(pipelines.size()));
-    else if (weights.value().size() != pipelines.size())
-        throw_<std::invalid_argument>(
-            "The number of `pipelines` and the number of `weights` must be equal, but are {} and {} instead.", pipelines.size(), weights.value().size());
-
-    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
-
-    auto factory = [tmp, weights=std::move(weights.value()), stop_at_shortest]() mutable {
-        return std::make_unique<sample_data_source>(std::move(*tmp), std::move(weights), stop_at_shortest);
-    };
-
-    return data_pipeline_builder{std::move(factory)};
-}
-
-data_pipeline_builder
-data_pipeline::constant(data example, std::optional<std::string> key)
-{
-    auto factory = [example = std::move(example), key = std::move(key)]() mutable
-    {
-        return std::make_unique<constant_data_source>(std::move(example), std::move(key));
-    };
-
-    return data_pipeline_builder{std::move(factory)};
-}
-
-data_pipeline_builder
-data_pipeline::count(std::int64_t start, std::optional<std::string> key)
-{
-    auto factory = [start, key = std::move(key)]() mutable
-    {
-        return std::make_unique<count_data_source>(start, std::move(key));
-    };
-
-    return data_pipeline_builder{std::move(factory)};
-}
-
-data_pipeline_builder
-data_pipeline::concat(
-    std::vector<data_pipeline> pipelines)
-{
-    if (pipelines.empty())
-        throw_<std::invalid_argument>(
-            "`pipelines` does not contain any elements. Can not concatenate from empty set.");
-
-    bool is_broken = std::any_of(
-        pipelines.begin(), pipelines.end(), [](const data_pipeline &pipeline)
-        {
-            return pipeline.is_broken();
-        });
-
-    if (is_broken)
-        throw_<std::invalid_argument>(
-            "At least one of the specified data pipelines is broken and cannot be concatenated.");
-
-    auto tmp = std::make_shared<std::vector<data_pipeline>>(std::move(pipelines));
-
-    auto factory = [tmp]() mutable
-    {
-        return std::make_unique<concat_data_source>(std::move(*tmp));
-    };
-    
-    return data_pipeline_builder{std::move(factory)};
-}
-
-data_pipeline_builder
 data_pipeline_builder::bucket(std::size_t bucket_size, bool drop_remainder) &&
 {
     if (bucket_size == 0)
@@ -331,6 +359,9 @@ data_pipeline_builder
 data_pipeline_builder::bucket_by_length(
     std::vector<std::pair<std::size_t, std::size_t>> bucket_sizes,
     data_length_fn fn,
+    std::size_t min_data_len,
+    bool skip_below_min_examples,
+    bool skip_above_max_examples,
     bool drop_remainder) &&
 {
     if (bucket_sizes.empty())
@@ -349,7 +380,45 @@ data_pipeline_builder::bucket_by_length(
         inner = std::move(factory_)]() mutable
     {
         return std::make_unique<bucket_by_length_data_source>(
-            inner(), std::move(bucket_sizes), std::move(fn), drop_remainder);
+            inner(),
+            std::move(bucket_sizes),
+            std::move(fn),
+            min_data_len,
+            skip_below_min_examples,
+            skip_above_max_examples,
+            drop_remainder);
+    };
+
+    return std::move(*this);
+}
+
+data_pipeline_builder
+data_pipeline_builder::dynamic_bucket(
+    float64 threshold,
+    cost_fn fn,
+    std::optional<std::size_t> maybe_min_num_examples,
+    std::optional<std::size_t> maybe_max_num_examples,
+    bool drop_remainder) &&
+{
+    if (threshold <= 0)
+        throw_<std::invalid_argument>("`threshold` must be greater than zero.");
+    if (maybe_max_num_examples && *maybe_max_num_examples == 0)
+        throw_<std::invalid_argument>("`max_num_examples` must be greater than zero.");
+    if (maybe_max_num_examples && 
+        maybe_min_num_examples && 
+        *maybe_max_num_examples < *maybe_min_num_examples) {
+        throw_<std::invalid_argument>("`max_num_examples` must be greater than or equal to `min_num_examples`.");
+    }
+
+    factory_ = [=, fn = std::move(fn), inner = std::move(factory_)]() mutable
+    {
+        return std::make_unique<dynamic_bucket_data_source>(
+            inner(), 
+            threshold, 
+            std::move(fn), 
+            maybe_min_num_examples, 
+            maybe_max_num_examples, 
+            drop_remainder);
     };
 
     return std::move(*this);
@@ -367,11 +436,17 @@ data_pipeline_builder::filter(predicate_fn fn) &&
 }
 
 data_pipeline_builder
-data_pipeline_builder::map(map_fn fn, std::size_t num_parallel_calls) &&
+data_pipeline_builder::map(const map_fn &fn, std::size_t num_parallel_calls) &&
 {
-    factory_ = [=, fn = std::move(fn), inner = std::move(factory_)]() mutable
+    if (num_parallel_calls == 0)
+        throw_<std::invalid_argument>(
+            "`num_parallel_calls` must be greater than zero.");
+
+    std::vector<map_fn> fns(num_parallel_calls, fn);
+
+    factory_ = [=, fns = std::move(fns), inner = std::move(factory_)]() mutable
     {
-        return std::make_unique<map_data_source>(inner(), std::move(fn), num_parallel_calls);
+        return std::make_unique<map_data_source>(inner(), std::move(fns), num_parallel_calls);
     };
 
     return std::move(*this);
@@ -380,39 +455,51 @@ data_pipeline_builder::map(map_fn fn, std::size_t num_parallel_calls) &&
 data_pipeline_builder
 data_pipeline_builder::prefetch(std::size_t num_examples) &&
 {
-    if (num_examples > 0)
-        factory_ = [=, inner = std::move(factory_)]
-        {
-            return std::make_unique<prefetch_data_source>(inner(), num_examples);
-        };
+    factory_ = [=, inner = std::move(factory_)]
+    {
+        return std::make_unique<prefetch_data_source>(inner(), num_examples);
+    };
 
     return std::move(*this);
 }
 
 data_pipeline_builder
-data_pipeline_builder::shard(std::size_t shard_idx, std::size_t num_shards) &&
+data_pipeline_builder::repeat(std::optional<std::size_t> num_repeats, bool reset_rng) &&
 {
+    factory_ = [=, inner = std::move(factory_)]
+    {
+        return std::make_unique<repeat_data_source>(inner(), num_repeats, reset_rng);
+    };
+
+    return std::move(*this);
+}
+
+data_pipeline_builder
+data_pipeline_builder::shard(std::size_t shard_idx, std::size_t num_shards, bool allow_uneven) &&
+{
+    if (num_shards == 0)
+        throw_<std::invalid_argument>(
+            "`num_shards` must be greater than zero.");
+
     if (shard_idx >= num_shards)
         throw_<std::invalid_argument>(
             "`shard_idx` must be less than `num_shards` ({}), but is {} instead.", num_shards, shard_idx);
 
-    if (num_shards > 1)
-        factory_ = [=, inner = std::move(factory_)]
-        {
-            return std::make_unique<shard_data_source>(inner(), shard_idx, num_shards);
-        };
+    factory_ = [=, inner = std::move(factory_)]
+    {
+        return std::make_unique<shard_data_source>(inner(), shard_idx, num_shards, allow_uneven);
+    };
 
     return std::move(*this);
 }
 
 data_pipeline_builder
-data_pipeline_builder::shuffle(std::size_t shuffle_window, bool strict, bool enabled) &&
+data_pipeline_builder::shuffle(std::size_t shuffle_window, std::optional<std::uint64_t> maybe_seed) &&
 {
-    if (enabled)
-        factory_ = [=, inner = std::move(factory_)]
-        {
-            return std::make_unique<shuffle_data_source>(inner(), shuffle_window, strict);
-        };
+    factory_ = [=, inner = std::move(factory_)]
+    {
+        return std::make_unique<shuffle_data_source>(inner(), shuffle_window, maybe_seed);
+    };
 
     return std::move(*this);
 }
@@ -420,11 +507,10 @@ data_pipeline_builder::shuffle(std::size_t shuffle_window, bool strict, bool ena
 data_pipeline_builder
 data_pipeline_builder::skip(std::size_t num_examples) &&
 {
-    if (num_examples > 0)
-        factory_ = [=, inner = std::move(factory_)]
-        {
-            return std::make_unique<skip_data_source>(inner(), num_examples);
-        };
+    factory_ = [=, inner = std::move(factory_)]
+    {
+        return std::make_unique<skip_data_source>(inner(), num_examples);
+    };
 
     return std::move(*this);
 }
@@ -465,17 +551,17 @@ data_pipeline_builder::and_return(std::size_t max_num_warnings) &&
 data_pipeline_error::~data_pipeline_error() = default;
 
 data_pipeline_builder
-list_files(std::string pathname, std::optional<std::string> maybe_pattern)
+list_files(const std::filesystem::path &path, std::optional<std::string> maybe_pattern)
 {
-    auto factory = [pathname = std::move(pathname), maybe_pattern = std::move(maybe_pattern)]
+    auto factory = [=, maybe_pattern = std::move(maybe_pattern)]
     {
         data_list list{};
 
         try {
-            list = detail::list_files(pathname, maybe_pattern);
+            list = detail::list_files(path, maybe_pattern);
         } catch (const std::system_error &) {
             throw_with_nested<data_pipeline_error>(
-                "The list of files under '{}' cannot be retrieved.", pathname);
+                "The list of files under '{}' cannot be retrieved.", path.string());
         }
 
         return std::make_unique<list_data_source>(std::move(list));

@@ -98,6 +98,10 @@ function(fairseq2n_set_compile_options target)
                 -Wno-used-but-marked-unused
                 -Wno-zero-as-null-pointer-constant
         )
+
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+            target_compile_options(${target} PRIVATE -Wno-unsafe-buffer-usage)
+        endif()
     endif()
 
     if(FAIRSEQ2N_TREAT_WARNINGS_AS_ERRORS)
@@ -159,9 +163,9 @@ function(fairseq2n_set_link_options target)
             )
         endif()
 
-        if(FAIRSEQ2N_TREAT_WARNINGS_AS_ERRORS)
-            target_link_options(${target} PRIVATE LINKER:-fatal_warnings)
-        endif()
+#        if(FAIRSEQ2N_TREAT_WARNINGS_AS_ERRORS)
+#            target_link_options(${target} PRIVATE LINKER:-fatal_warnings)
+#        endif()
     else()
         message(FATAL_ERROR "fairseq2n supports only Linux and macOS operating systems!")
     endif()

@@ -4,20 +4,57 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Dict, final
 
-from fairseq2.assets import asset_store, download_manager
-from fairseq2.models.llama.builder import LLaMAConfig, create_llama_model, llama_archs
-from fairseq2.models.llama.tokenizer import LLaMATokenizer
-from fairseq2.models.transformer import TransformerDecoderModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader, TokenizerLoader
+from fairseq2.assets import AssetCard
+from fairseq2.data.text import (
+    AbstractTextTokenizerLoader,
+    BasicSentencePieceTokenizer,
+    TextTokenizer,
+    load_text_tokenizer,
+)
+from fairseq2.gang import Gang
+from fairseq2.models.config_loader import StandardModelConfigLoader
+from fairseq2.models.llama.archs import llama_archs
+from fairseq2.models.llama.factory import LLAMA_FAMILY, LLaMAConfig, create_llama_model
+from fairseq2.models.llama.tokenizer import LLaMA3Tokenizer
+from fairseq2.models.loader import DenseModelLoader, load_model
+from fairseq2.models.transformer import (
+    TransformerDecoderModel,
+    shard_transformer_decoder_model,
+)
 from fairseq2.models.utils.checkpoint import convert_model_state_dict
+from fairseq2.typing import override
+
+load_llama_config = StandardModelConfigLoader(
+    family=LLAMA_FAMILY, config_kls=LLaMAConfig, arch_configs=llama_archs
+)
+
+
+@final
+class LLaMAModelLoader(DenseModelLoader[TransformerDecoderModel, LLaMAConfig]):
+    """Loads LLaMA models."""
+
+    @override
+    def _shard(
+        self, model: TransformerDecoderModel, gangs: Dict[str, Gang], card: AssetCard
+    ) -> None:
+        gang = gangs["tp"]  # tensor parallel
+
+        shard_embed_dim = card.field("shard_embed_dim").get_as_(bool, True)
+
+        shard_transformer_decoder_model(model, gang, shard_embed_dim=shard_embed_dim)
 
 
 def convert_llama_checkpoint(
-    checkpoint: Mapping[str, Any], config: LLaMAConfig
-) -> Mapping[str, Any]:
-    """Convert a reference LLaMA checkpoint to fairseq2."""
+    checkpoint: Dict[str, Any], config: LLaMAConfig
+) -> Dict[str, Any]:
+    """Convert a reference LLaMA checkpoint to fairseq2 format."""
+    # Check if we have a fairseq2 checkpoint.
+    if "output.weight" not in checkpoint:
+        return checkpoint
+
     key_map = {
         # fmt: off
         r"^layers\.([0-9]+)\.attention\.wq\.":    r"decoder.layers.\1.self_attn.q_proj.",
@@ -43,16 +80,31 @@ def convert_llama_checkpoint(
     return {"model": checkpoint}
 
 
-load_llama_config = ConfigLoader[LLaMAConfig](asset_store, llama_archs)
-
-load_llama_model = ModelLoader[TransformerDecoderModel, LLaMAConfig](
-    asset_store,
-    download_manager,
-    load_llama_config,
-    create_llama_model,
-    convert_llama_checkpoint,
+load_llama_model = LLaMAModelLoader(
+    config_loader=load_llama_config,
+    factory=create_llama_model,
+    checkpoint_converter=convert_llama_checkpoint,
 )
 
-load_llama_tokenizer = TokenizerLoader[LLaMATokenizer](
-    asset_store, download_manager, LLaMATokenizer
-)
+load_model.register(LLAMA_FAMILY, load_llama_model)
+
+
+@final
+class LLaMATokenizerLoader(AbstractTextTokenizerLoader[TextTokenizer]):
+    """Loads LLaMA tokenizers."""
+
+    @override
+    def _load(self, path: Path, card: AssetCard) -> TextTokenizer:
+        if card.field("use_v2_tokenizer").get_as_(bool, False):
+            f = card.field("model_config").field("vocab_info").field("eos_idx")
+
+            eot_idx = 128_009  # end-of-turn
+
+            return LLaMA3Tokenizer(path, instruct=f.get_as_(int) == eot_idx)
+
+        return BasicSentencePieceTokenizer(path)
+
+
+load_llama_tokenizer = LLaMATokenizerLoader()
+
+load_text_tokenizer.register(LLAMA_FAMILY, load_llama_tokenizer)

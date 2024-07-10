@@ -18,7 +18,7 @@ macro(__torch_determine_version)
     )
 
     if(result GREATER 0)
-        message(FATAL_ERROR "fairseq2 cannot determine PEP 440 version of PyTorch!")
+        message(FATAL_ERROR "fairseq2n cannot determine PEP 440 version of PyTorch!")
     endif()
 
     if(TORCH_PEP440_VERSION MATCHES "^[0-9]+\.[0-9]+(\.[0-9]+)?")
@@ -40,7 +40,7 @@ macro(__torch_determine_cuda_version)
     )
 
     if(result GREATER 0)
-        message(FATAL_ERROR "fairseq2 cannot determine CUDA version of PyTorch!")
+        message(FATAL_ERROR "fairseq2n cannot determine CUDA version of PyTorch!")
     endif()
 
     # We ignore the patch since it is not relevant for compatibility checks.
@@ -69,6 +69,8 @@ if(Python3_Interpreter_FOUND)
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
+
+    cmake_path(CONVERT ${torch_init_file} TO_CMAKE_PATH_LIST torch_init_file NORMALIZE)
 
     cmake_path(REPLACE_FILENAME torch_init_file lib OUTPUT_VARIABLE torch_lib_dir)
     cmake_path(REPLACE_FILENAME torch_init_file include OUTPUT_VARIABLE torch_include_dir)
@@ -129,6 +131,10 @@ endif()
 
 if(TORCH_CUDA_LIBRARY)
     __torch_determine_cuda_version()
+
+    set(TORCH_VARIANT "CUDA ${TORCH_CUDA_VERSION_MAJOR}.${TORCH_CUDA_VERSION_MINOR}")
+else()
+    set(TORCH_VARIANT "CPU-only")
 endif()
 
 if(NOT TARGET torch_cxx11_abi)
@@ -147,8 +153,9 @@ if(NOT TARGET torch_cxx11_abi)
         )
 
         if(result EQUAL 0)
-            target_compile_definitions(torch_cxx11_abi INTERFACE
-                _GLIBCXX_USE_CXX11_ABI=$<BOOL:${TORCH_CXX11_ABI}>
+            target_compile_definitions(torch_cxx11_abi
+                INTERFACE
+                    _GLIBCXX_USE_CXX11_ABI=$<BOOL:${TORCH_CXX11_ABI}>
             )
         endif()
 

@@ -12,7 +12,6 @@
 
 #include "fairseq2n/data/data_pipeline.h"
 #include "fairseq2n/data/data_source.h"
-#include "fairseq2n/data/composite_data_source.h"
 
 namespace fairseq2n::detail {
 
@@ -25,22 +24,32 @@ public:
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     std::optional<data>
     next_in_pipeline(std::size_t pipeline_idx);
 
+    bool
+    are_all_done() noexcept;
+
 private:
-    std::unique_ptr<composite_data_source> inner_;
-    std::size_t pipeline_idx_;
-    std::size_t pipelines_count_;
+    std::vector<data_pipeline> pipelines_;
+    std::vector<std::optional<data>> buffer_{};
+    std::size_t buffer_idx_ = 0;
+    std::vector<bool> is_epoch_done_;
+    bool is_eod_ = false;
+    bool stop_at_shortest_;
+    data_source_finitude_type finitude_type_;
 };
 
 }  // namespace fairseq2n::detail

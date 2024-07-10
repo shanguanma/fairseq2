@@ -6,31 +6,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
-    Iterable,
     Iterator,
+    List,
     Mapping,
     Optional,
     Sequence,
     Tuple,
     TypedDict,
     Union,
+    final,
 )
 
 from fairseq2n import DOC_MODE
 from torch import Tensor
 from typing_extensions import Self
 
-from fairseq2.data.typing import PathLike, StringLike
-from fairseq2.memory import MemoryBlock
+from fairseq2.data.memory import MemoryBlock
 
 if TYPE_CHECKING or DOC_MODE:
 
-    class DataPipeline(Iterable[Any]):
+    @final
+    class DataPipeline:
         """fairseq2 native data pipeline.
 
         The pipeline state can be persisted to the disk, allowing it to be resumed later.
@@ -47,8 +49,15 @@ if TYPE_CHECKING or DOC_MODE:
             so it's not safe to have several iterators over the same DataPipeline.
             """
 
-        def reset(self) -> None:
-            """Move back to the first example in the data pipeline."""
+        def reset(self, reset_rng: bool = False) -> None:
+            """Move back to the first example in the data pipeline.
+
+            :param reset_rng:
+                If ``True``, resets all random number generators in the pipeline.
+            """
+
+        def is_infinite(self) -> bool:
+            ...
 
         @property
         def is_broken(self) -> bool:
@@ -58,48 +67,81 @@ if TYPE_CHECKING or DOC_MODE:
             :class:`DataPipelineError`.
             """
 
-        def state_dict(self) -> Dict[str, Any]:
+        def state_dict(self, strict: bool = True) -> Dict[str, Any]:
             """Return a dictionary containing the state of the data pipeline.
 
             The current position of the data pipeline can be restored by passing
             the returned state dictionary to :meth:`load_state_dict`.
+
+            :param strict:
+                If ``True``, the internal buffers will be saved as part of
+                ``state_dict``. This ensures that on preemption no example will
+                be lost, but for large buffers this can significantly increase
+                the state size and the time to restore the data pipeline.
             """
 
-        def load_state_dict(
-            self, state_dict: Mapping[str, Any], strict: bool = True
-        ) -> None:
+        def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
             """Restore the state of the data pipeline from ``state_dict``.
 
             :param state_dict:
                 A state dictionary previously returned by :meth:`state_dict`.
-            :param strict:
-                If ``True``, enforces that the keys in ``state_dict`` match the
-                keys returned by :meth:`state_dict`.
             """
 
         @staticmethod
-        def zip(
-            pipelines: Sequence[DataPipeline],
-            names: Optional[Sequence[str]] = None,
-            zip_to_shortest: bool = False,
-            flatten: bool = False,
-            disable_parallelism: bool = False,
-        ) -> DataPipelineBuilder:
-            """Zip together examples read from ``pipelines``.
+        def concat(pipelines: Sequence[DataPipeline]) -> DataPipelineBuilder:
+            """Concatenate examples from ``pipelines``.
 
             :param pipelines:
-                The data pipelines to zip.
-            :param names:
-                The names to assign to the data pipelines.
-            :param flatten:
-            :param disable_parallelism:
-                If ``True``, calls each data pipeline sequentially.
+                The data pipelines to concatenate.
             """
+
+        @staticmethod
+        def constant(example: Any, key: Optional[str] = None) -> DataPipelineBuilder:
+            """Repeatedly yield ``example``.
+
+            This pipeline is pseudo-infinite; when used with functions
+            that combine pipelines (e.g. sample, round_robin, zip),
+            it will yield examples only as long as other
+            pipelines yield examples.
+
+            See :ref:`reference/data:pseudo-infinite and infinite pipelines`
+            for more details.
+
+            :param example:
+                Example to yield infinitely.
+            :param key:
+                If specified, yields dictionaries as examples,
+                where the key is ``key`` and the value is ``example``.
+            """
+            ...
+
+        @staticmethod
+        def count(
+            start: int = 0, step: int = 1, key: Optional[str] = None
+        ) -> DataPipelineBuilder:
+            """Count from ``start`` in steps of size ``step``.
+
+            This pipeline is pseudo-infinite; when used with functions
+            that combine pipelines (e.g. sample, round_robin, zip),
+            it will yield examples only as long as other
+            pipelines yield examples.
+
+            See :ref:`reference/data:pseudo-infinite and infinite pipelines`
+            for more details.
+
+            :param start:
+                Number to start counting from.
+            :param step:
+                Count step size.
+            :param key:
+                If specified, yields dictionaries as examples,
+                where the key is ``key`` and the value is the current number.
+            """
+            ...
 
         @staticmethod
         def round_robin(
-            pipelines: Sequence[DataPipeline],
-            stop_at_shortest: bool = False,
+            pipelines: Sequence[DataPipeline], stop_at_shortest: bool = False
         ) -> DataPipelineBuilder:
             """Extract examples from ``pipelines`` in round robin.
 
@@ -115,37 +157,44 @@ if TYPE_CHECKING or DOC_MODE:
         def sample(
             pipelines: Sequence[DataPipeline],
             weights: Optional[Sequence[float]] = None,
-            stop_at_shortest: bool = False,
+            seed: Optional[int] = None,
         ) -> DataPipelineBuilder:
-            """Extract examples from ``pipelines`` by sampling based on ``weights``.
+            """Extract examples from ``pipelines`` by sampling based on
+            ``weights``. Circles around pipelines until all have reached their
+            end at least once.
 
             :param data_pipelines:
                 The data pipelines to sample from.
             :param weights:
-                Desired distribution of pipelines. If None, use uniform distribution.
-            :param stop_at_shortest:
-                If ``True``, stop sampling when first pipeline reaches its end.
-                If ``False``, circle around finished pipelines until all pipelines
-                reach their end.
+                Desired distribution of pipelines. If ``None``, use uniform distribution.
             """
 
         @staticmethod
-        def constant(example: Any, key: Optional[str] = None) -> DataPipelineBuilder:
-            ...
-
-        @staticmethod
-        def count(start: int = 0, key: Optional[str] = None) -> DataPipelineBuilder:
-            ...
-
-        @staticmethod
-        def concat(pipelines: Sequence[DataPipeline]) -> DataPipelineBuilder:
-            """Concatenate examples from ``pipelines``.
+        def zip(
+            pipelines: Sequence[DataPipeline],
+            names: Optional[Sequence[str]] = None,
+            zip_to_shortest: bool = False,
+            flatten: bool = False,
+            disable_parallelism: bool = False,
+        ) -> DataPipelineBuilder:
+            """Zip together examples read from ``pipelines``.
 
             :param pipelines:
-                The data pipelines to concatenate.
+                The data pipelines to zip.
+            :param names:
+                The names to assign to the data pipelines. If ``None``, yields examples as lists.
+            :param zip_to_shortest:
+                If ``True``, stops yielding examples after shortest pipeline terminates.
+                Otherwise, all pipelines (that are not pseudo-infinite)
+                must have the same number of examples.
+            :param flatten:
+                If ``True``, flatten examples from each pipeline into one dictionary or list.
+                All pipelines must return the same type (dict or non-dict).,
+            :param disable_parallelism:
+                If ``True``, calls each data pipeline sequentially.
             """
-            ...
 
+    @final
     class DataPipelineBuilder:
         """API to create DataPipeline"""
 
@@ -163,6 +212,9 @@ if TYPE_CHECKING or DOC_MODE:
             self,
             bucket_sizes: Sequence[Tuple[int, int]],
             selector: Optional[str] = None,
+            min_data_len: int = 1,
+            skip_below_min_examples: bool = False,
+            skip_above_max_examples: bool = False,
             drop_remainder: bool = False,
         ) -> Self:
             """Combine examples of similar shape into batches."""
@@ -177,6 +229,35 @@ if TYPE_CHECKING or DOC_MODE:
 
             This is equivalent to calling `.map(Collater())`.
             See :py:class:`fairseq2.data.Collater` for details.
+            """
+
+        def dynamic_bucket(
+            self,
+            threshold: float,
+            cost_fn: Callable[[Any], float],
+            min_num_examples: Optional[int] = None,
+            max_num_examples: Optional[int] = None,
+            drop_remainder: bool = False,
+        ) -> Self:
+            """Combine a number of consecutive examples into a single example
+            based on cumulative cost of examples, as measured by
+            user-provided ``cost_fn``.
+
+            Yields a bucket once the cumulative cost produced by ``cost_fn``
+            meets or exceeds ``threshold``.
+
+            :param threshold:
+                Threshold for cumulative cost to trigger bucketing.
+            :param cost_fn:
+                Cost function that outputs cost for a particular example.
+            :param min_num_examples:
+                Minimum number of examples per bucket.
+            :param max_num_examples:
+                Maximum number of examples per bucket.
+            :param drop_remainder:
+                If ``True``, drops the last bucket in case it has fewer than
+                ``min_num_examples`` examples or the cumulative cost has not reached
+                ``threshold`` yet.
             """
 
         def filter(self, predicate: Callable[[Any], Any]) -> Self:
@@ -214,7 +295,7 @@ if TYPE_CHECKING or DOC_MODE:
                 ``.map([f1, f2])`` is the more efficient version of ``.map(f1).map(f2)``
 
             :param selector:
-                The column to apply the function to. Several colums can be specified by separating them with a ",".
+                The column to apply the function to. Several columns can be specified by separating them with a ",".
                 See :ref:`reference/data:column syntax` for more details.
             :param num_parallel_calls:
                 The number of examples to process in parallel.
@@ -228,7 +309,21 @@ if TYPE_CHECKING or DOC_MODE:
                 The number of examples to prefetch.
             """
 
-        def shard(self, shard_idx: int, num_shards: int) -> Self:
+        def repeat(
+            self, num_repeats: Optional[int] = None, reset_rng: bool = False
+        ) -> Self:
+            """Repeats the sequence of pipeline examples ``num_repeats`` times.
+
+            :param num_repeats:
+                The number of times to repeat examples. If ``None``, repeats infinitely.
+            :param reset_rng:
+                If ``True``, upon repeats, resets all random number generators in pipeline.
+            """
+            ...
+
+        def shard(
+            self, shard_idx: int, num_shards: int, allow_uneven: bool = False
+        ) -> Self:
             """Read only 1/``num_shards`` of the examples in the data pipeline.
 
             :param shard_idx:
@@ -237,9 +332,7 @@ if TYPE_CHECKING or DOC_MODE:
                 The number of shards.
             """
 
-        def shuffle(
-            self, shuffle_window: int, strict: bool = True, enabled: bool = True
-        ) -> Self:
+        def shuffle(self, shuffle_window: int, seed: Optional[int] = None) -> Self:
             """Shuffle examples using a fixed sized buffer.
 
             :param shuffle_window:
@@ -247,14 +340,6 @@ if TYPE_CHECKING or DOC_MODE:
                 will be randomly sampled from this buffer, and selected examples
                 will be replaced with new examples. If ``0``, all examples will
                 be loaded into memory for full shuffling.
-            :param strict:
-                If ``True``, the intermediate shuffle buffer will be saved as
-                part of ``state_dict``. This ensures that on preemption no
-                example will be lost, but for large buffers this can
-                significantly increase the state size and the time to restore
-                the data pipeline.
-            :param enabled:
-                If ``False``, disables shuffling.
             """
 
         def skip(self, num_examples: int) -> Self:
@@ -281,25 +366,23 @@ if TYPE_CHECKING or DOC_MODE:
     def get_last_failed_example() -> Any:
         ...
 
-    def list_files(
-        pathname: PathLike, pattern: Optional[StringLike] = None
-    ) -> DataPipelineBuilder:
-        """List recursively all files under ``pathname`` that matches ``pattern``.
+    def list_files(path: Path, pattern: Optional[str] = None) -> DataPipelineBuilder:
+        """List recursively all files under ``path`` that matches ``pattern``.
 
-        :param pathname:
+        :param path:
             The path to traverse.
         :param pattern:
             If non-empty, a pattern that follows the syntax of :mod:`fnmatch`.
         """
 
-    def read_sequence(seq: Sequence[Any]) -> "DataPipelineBuilder":
+    def read_sequence(seq: Sequence[Any]) -> DataPipelineBuilder:
         """Read every element in ``seq``.
 
         :param seq:
             The sequence to read.
         """
 
-    def read_zipped_records(pathname: PathLike) -> DataPipelineBuilder:
+    def read_zipped_records(path: Path) -> DataPipelineBuilder:
         """Read each file in a zip archive"""
         ...
 
@@ -334,6 +417,7 @@ if TYPE_CHECKING or DOC_MODE:
         def pad_to_multiple(self) -> int:
             ...
 
+    @final
     class Collater:
         """Concatenate a list of inputs into a single inputs.
 
@@ -379,6 +463,7 @@ if TYPE_CHECKING or DOC_MODE:
             """Concatenate the input tensors"""
             ...
 
+    @final
     class FileMapper:
         """For a given file name, returns the file content as bytes.
 
@@ -397,13 +482,13 @@ if TYPE_CHECKING or DOC_MODE:
 
         def __init__(
             self,
-            root_dir: Optional[PathLike] = None,
+            root_dir: Optional[Path] = None,
             cached_fd_count: Optional[int] = None,
         ) -> None:
             ...
 
-        def __call__(self, filename: PathLike) -> FileMapperOutput:
-            """Parses the file name and returns the file bytes.
+        def __call__(self, pathname: str) -> FileMapperOutput:
+            """Parses the pathname and returns the file bytes.
 
             :returns:
                 A dict with the following keys::
@@ -474,5 +559,79 @@ class SequenceData(TypedDict):
 
 
 class FileMapperOutput(TypedDict):
-    path: PathLike
+    path: str
     data: MemoryBlock
+
+
+def create_bucket_sizes(
+    *,
+    max_num_elements: int,
+    max_seq_len: int,
+    min_seq_len: int = 1,
+    num_seqs_multiple_of: int = 1,
+) -> List[Tuple[int, int]]:
+    """Create optimal bucket sizes for :meth:`DataPipeline.bucket_by_length`.
+
+    :param max_num_elements:
+        The maximum number of elements that each bucket can contain.
+    :param max_seq_len:
+        The maximum sequence length.
+    :param min_seq_len:
+        The minimum sequence length.
+    :param num_seqs_multiple_of:
+        The number of sequences contained in each bucket must be a multiple of
+        this value.
+    """
+    if max_seq_len > max_num_elements:
+        raise ValueError(
+            f"`max_seq_len` must be less than or equal to `max_num_elements` ({max_num_elements}), but is {max_seq_len} instead."
+        )
+
+    if min_seq_len < 1:
+        raise ValueError(
+            f"`min_seq_len` must be greater than zero, but is {min_seq_len} instead."
+        )
+
+    if min_seq_len > max_seq_len:
+        raise ValueError(
+            f"`min_seq_len` must be less than or equal to `max_seq_len` ({max_seq_len}), but is {min_seq_len} instead."
+        )
+
+    if num_seqs_multiple_of < 1:
+        raise ValueError(
+            f"`num_seqs_multiple_of` must be greater than or equal to 1, but is {num_seqs_multiple_of} instead."
+        )
+
+    if max_num_elements % max_seq_len != 0:
+        raise ValueError(
+            f"`max_num_elements` must be equal to a multiple of `max_seq_len`, but is {max_num_elements} instead."
+        )
+
+    bucket_sizes = []
+
+    seq_len = 1
+
+    bucket_size = max_num_elements
+
+    while seq_len < max_seq_len:
+        if seq_len >= min_seq_len:
+            bucket_sizes.append((bucket_size, seq_len))
+
+        bucket_size = max_num_elements // (seq_len + 1)
+
+        seq_len = max_num_elements // bucket_size
+
+    bucket_sizes.append((bucket_size, max_seq_len))
+
+    if num_seqs_multiple_of == 1:
+        return bucket_sizes
+
+    cropped_bucket_sizes = []
+
+    for bucket_size, seq_len in bucket_sizes:
+        if bucket_size > num_seqs_multiple_of:
+            bucket_size -= bucket_size % num_seqs_multiple_of
+
+        cropped_bucket_sizes.append((bucket_size, seq_len))
+
+    return cropped_bucket_sizes

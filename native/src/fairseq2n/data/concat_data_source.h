@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <memory>
 #include <utility>
 #include <vector>
 
@@ -18,23 +17,26 @@ namespace fairseq2n::detail {
 class concat_data_source final : public data_source {
 public:
     explicit
-    concat_data_source(
-        std::vector<data_pipeline> &&pipelines);
+    concat_data_source(std::vector<data_pipeline> &&pipelines) noexcept;
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     std::vector<data_pipeline> pipelines_;
+    data_source_finitude_type finitude_type_;
 };
 
 }  // namespace fairseq2n::detail

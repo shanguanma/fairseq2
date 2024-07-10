@@ -9,10 +9,13 @@ on:
     inputs:
       torch:
         type: string
-        default: '2.1.1'
+        default: '2.3.0'
       py:
         type: string
         default: '3.11'
+
+env:
+    ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   lint:
@@ -107,5 +110,3 @@ jobs:
 
           mypy
           mypy native/python
-          mypy recipes/llama
-          mypy recipes/mistral

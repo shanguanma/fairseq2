@@ -6,7 +6,7 @@
 
 import pytest
 
-from fairseq2.data import DataPipelineError, read_sequence
+from fairseq2.data import read_sequence
 
 
 class TestFilterOp:
@@ -14,7 +14,9 @@ class TestFilterOp:
         def fn(d: int) -> bool:
             return d % 2 == 1
 
-        pipeline = read_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9]).filter(fn).and_return()
+        seq = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        pipeline = read_sequence(seq).filter(fn).and_return()
 
         for _ in range(2):
             assert list(pipeline) == [1, 3, 5, 7, 9]
@@ -30,12 +32,8 @@ class TestFilterOp:
 
         pipeline = read_sequence([1, 2, 3, 4]).filter(fn).and_return()
 
-        with pytest.raises(DataPipelineError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             for d in pipeline:
                 pass
 
-        cause = exc_info.value.__cause__
-
-        assert isinstance(cause, ValueError)
-
-        assert str(cause) == "filter error"
+        assert str(exc_info.value) == "filter error"

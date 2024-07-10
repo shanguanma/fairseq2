@@ -4,16 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING, Optional, TypedDict
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional, TypedDict, final
 
 from fairseq2n import DOC_MODE
 from torch import Tensor
 
-from fairseq2.memory import MemoryBlock
+from fairseq2.data.memory import MemoryBlock
 from fairseq2.typing import Device
 
 if TYPE_CHECKING or DOC_MODE:
 
+    @final
     class ImageDecoder:
         def __init__(
             self,
@@ -22,7 +25,7 @@ if TYPE_CHECKING or DOC_MODE:
         ) -> None:
             ...
 
-        def __call__(self, memory_block: MemoryBlock) -> "ImageDecoderOutput":
+        def __call__(self, memory_block: MemoryBlock) -> ImageDecoderOutput:
             ...
 
 else:

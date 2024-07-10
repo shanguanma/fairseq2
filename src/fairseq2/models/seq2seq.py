@@ -8,29 +8,36 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, final
 
-import torch
 from torch import Tensor
-from torch.nn import Module
 
 from fairseq2.data import VocabularyInfo
-from fairseq2.models.sequence import SequenceModelOutput
+from fairseq2.models.model import Model
+from fairseq2.models.sequence import SequenceBatch, SequenceModelOutput
 from fairseq2.nn.padding import PaddingMask
 
 
-class Seq2SeqModel(Module, ABC):
+class Seq2SeqModel(Model, ABC):
     """Represents a sequence-to-sequence model."""
 
+    max_target_seq_len: int
     target_vocab_info: VocabularyInfo
 
-    def __init__(self, target_vocab_info: VocabularyInfo) -> None:
+    def __init__(
+        self,
+        max_target_seq_len: int,
+        target_vocab_info: VocabularyInfo,
+    ) -> None:
         """
+        :param max_target_seq_len:
+            The maximum length of sequences produced by the model.
         :param target_vocab_info:
             The vocabulary information of sequences produced by the model.
         """
         super().__init__()
 
+        self.max_target_seq_len = max_target_seq_len
         self.target_vocab_info = target_vocab_info
 
     @abstractmethod
@@ -41,6 +48,7 @@ class Seq2SeqModel(Module, ABC):
         """
 
 
+@final
 @dataclass
 class Seq2SeqBatch:
     """Represents a sequence-to-sequence batch."""
@@ -51,8 +59,8 @@ class Seq2SeqBatch:
     is any number of sequence-specific dimensions including none."""
 
     source_padding_mask: Optional[PaddingMask]
-    """The padding mask of ``source_seqs``. *Shape:* :math:`(N,S_{src})`, where
-    :math:`N` is the batch size and :math:`S_{src}` is the source sequence
+    """The padding mask of :attr:`source_seqs`. *Shape:* :math:`(N,S_{src})`,
+    where :math:`N` is the batch size and :math:`S_{src}` is the source sequence
     length."""
 
     target_seqs: Tensor
@@ -61,59 +69,59 @@ class Seq2SeqBatch:
     is any number of sequence-specific dimensions including none."""
 
     target_padding_mask: Optional[PaddingMask]
-    """The padding mask of ``target_seqs``. *Shape:* :math:`(N,S_{tgt})`, where
-    :math:`N` is the batch size and :math:`S_{tgt}` is the target sequence
+    """The padding mask of :attr:`target_seqs`. *Shape:* :math:`(N,S_{tgt})`,
+    where :math:`N` is the batch size and :math:`S_{tgt}` is the target sequence
     length."""
 
     example: Any = None
     """The data example from which this batch was constructed."""
 
-    def as_training_input(self) -> Tuple[Seq2SeqBatch, Tensor]:
-        """Return a copy of this batch for model training.
-
-        :returns:
-          - The batch with target sequences trimmed one step from the end to use
-            as model input.
-          - The target sequences trimmed one step from the beginning to use as
-            targets in loss computation.
-        """
-        if (target_seq_len := self.target_seqs.size(1)) < 2:
-            raise ValueError(
-                f"The sequence length of `target_seqs` must be at least 2 for training, but is {target_seq_len} instead."
-            )
-
-        target_seqs = self.target_seqs[:, :-1]  # TODO: even padding for fp16?
-
-        if self.target_padding_mask is None:
-            target_padding_mask = None
-        else:
-            target_padding_mask = self.target_padding_mask.trim(1)
-
-        batch = Seq2SeqBatch(
-            self.source_seqs, self.source_padding_mask, target_seqs, target_padding_mask
-        )
-
-        return batch, self.target_seqs[:, 1:]
-
     @property
     def batch_size(self) -> int:
-        """The size of the batch."""
+        """The size of the batch dimension."""
         return self.target_seqs.size(0)
 
-    def compute_num_source_tokens(self) -> Tensor:
-        """Compute the number of source tokens in this batch."""
+    def num_source_elements(self) -> int:
+        """Return the number of source elements in the batch."""
         if self.source_padding_mask is None:
-            return torch.full(
-                (), self.source_seqs.numel(), device=self.source_seqs.device
-            )
+            return self.source_seqs.numel()
 
-        return self.source_padding_mask.seq_lens.sum()
+        return int(self.source_padding_mask.seq_lens.sum())
 
-    def compute_num_target_tokens(self) -> Tensor:
-        """Compute the number of target tokens in this batch."""
+    def num_target_elements(self) -> int:
+        """Return the number of target elements in the batch."""
         if self.target_padding_mask is None:
-            return torch.full(
-                (), self.target_seqs.numel(), device=self.target_seqs.device
-            )
+            return self.target_seqs.numel()
 
-        return self.target_padding_mask.seq_lens.sum()
+        return int(self.target_padding_mask.seq_lens.sum())
+
+
+def as_auto_regressive_input(batch: Seq2SeqBatch) -> Tuple[Seq2SeqBatch, SequenceBatch]:
+    """Use ``batch`` to train an auto-regressive model.
+
+    :returns:
+        The tuple of input and target batches.
+    """
+    if (seq_len := batch.target_seqs.size(1)) < 2:
+        raise ValueError(
+            f"The sequence length of `batch.target_seqs` must be at least 2 for training, but is {seq_len} instead."
+        )
+
+    seqs, targets = batch.target_seqs[:, :-1], batch.target_seqs[:, 1:]
+
+    if batch.target_padding_mask is None:
+        padding_mask = None
+    else:
+        padding_mask = batch.target_padding_mask.trim(1)
+
+    batch = Seq2SeqBatch(
+        batch.source_seqs,
+        batch.source_padding_mask,
+        seqs,
+        padding_mask,
+        batch.example,
+    )
+
+    target_batch = SequenceBatch(targets, padding_mask)
+
+    return batch, target_batch

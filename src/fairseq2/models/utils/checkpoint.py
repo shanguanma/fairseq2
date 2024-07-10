@@ -5,73 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import re
-import warnings
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Union
-
-import torch
-from torch import Tensor
-from typing_extensions import TypeAlias
-
-from fairseq2.data.typing import PathLike
-from fairseq2.typing import Device
-
-MapLocation: TypeAlias = Optional[
-    Union[Callable[[Tensor, str], Tensor], Device, str, Dict[str, str]]
-]
-
-
-class CheckpointConverter(Protocol):
-    """Converts checkpoints to fairseq2."""
-
-    def __call__(self, checkpoint: Mapping[str, Any]) -> Mapping[str, Any]:
-        """
-        :param checkpoint:
-            The checkpoint to convert.
-
-        :returns:
-            A converted checkpoint that is compatible with fairseq2.
-        """
-
-
-def load_checkpoint(
-    pathname: PathLike,
-    *,
-    map_location: MapLocation = None,
-    restrict: bool = False,
-    converter: Optional[CheckpointConverter] = None,
-) -> Mapping[str, Any]:
-    """Load the checkpoint stored in ``pathname``.
-
-    :param pathname:
-        The pathname of the checkpoint.
-    :param map_location:
-        Same as the ``map_location`` parameter of :meth:`torch.load`.
-    :param restrict:
-        If ``True``, restricts the Python unpickler to load only tensors,
-        primitive types, and dictionaries.
-    :param converter:
-        The converter to which the loaded checkpoint will be passed for further
-        processing.
-
-    :returns:
-        The loaded checkpoint.
-    """
-    with warnings.catch_warnings():
-        # Suppress the noisy deprecated `TypedStorage` warning.
-        warnings.simplefilter("ignore")
-
-        checkpoint: Mapping[str, Any] = torch.load(
-            str(pathname), map_location, weights_only=restrict
-        )
-
-    if converter is not None:
-        checkpoint = converter(checkpoint)
-
-    return checkpoint
+from typing import Any, Dict, Mapping
 
 
 def convert_model_state_dict(
-    state_dict: Mapping[str, Any], key_map: Mapping[str, str]
+    state_dict: Dict[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a model state dictionary to fairseq2.
 
@@ -102,7 +40,7 @@ def convert_model_state_dict(
 
 
 def convert_fairseq_checkpoint(
-    checkpoint: Mapping[str, Any], key_map: Mapping[str, str]
+    checkpoint: Dict[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a fairseq checkpoint to fairseq2.
 

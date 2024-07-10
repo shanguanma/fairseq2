@@ -7,7 +7,6 @@
 #include "fairseq2n/data/file_mapper.h"
 
 #include <array>
-#include <filesystem>
 #include <stdexcept>
 
 #include <fmt/format.h>
@@ -23,7 +22,7 @@ using namespace fairseq2n::detail;
 namespace fairseq2n {
 
 file_mapper::file_mapper(
-    std::optional<std::string> maybe_root_dir,
+    std::optional<std::filesystem::path> maybe_root_dir,
     std::optional<std::size_t> maybe_cached_fd_count) noexcept
   : cache_{/*capacity=*/maybe_cached_fd_count.value_or(default_cached_fd_count)}
 {
@@ -42,13 +41,13 @@ file_mapper::operator()(data &&d) const
 
     std::array<immutable_string, 3> parts{};
 
-    auto iter = parts.begin();
+    auto pos = parts.begin();
 
     // The pathname can optionally contain offset and size specifiers separated
     // by semicolons (i.e. `pathname:offset:size`).
-    pathname.split(':', [&pathname, &parts, &iter](immutable_string &&part)
+    pathname.split(':', [&pathname, &parts, &pos](immutable_string &&part)
     {
-        if (iter == parts.end())
+        if (pos == parts.end())
             throw_<std::invalid_argument>(
                 "The input string must be a pathname with optional offset and size specifiers, but is '{}' instead.", pathname);
 
@@ -58,7 +57,7 @@ file_mapper::operator()(data &&d) const
             throw_<std::invalid_argument>(
                 "The input string must be a pathname with optional offset and size specifiers, but is '{}' instead.", pathname);
 
-        *iter++ = std::move(part);
+        *pos++ = std::move(part);
 
         return true;
     });
@@ -125,7 +124,7 @@ file_mapper::operator()(data &&d) const
 memory_block
 file_mapper::get_memory_map(const immutable_string &pathname) const
 {
-    std::lock_guard<std::mutex> cache_lock{cache_mutex_};
+    std::lock_guard<std::mutex> cache_guard{cache_mutex_};
 
     // Check the LRU cache first.
     memory_block *maybe_cached_block = cache_.maybe_get(pathname);

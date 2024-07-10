@@ -19,7 +19,7 @@ from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.projection import Linear
 from fairseq2.nn.transformer.attention import SDPA, create_default_sdpa
 from fairseq2.nn.transformer.attention_mask import AttentionMask, CustomAttentionMask
-from fairseq2.typing import DataType, Device, finaloverride
+from fairseq2.typing import DataType, Device, override
 
 
 @final
@@ -97,7 +97,7 @@ class RelativePositionSDPA(SDPA):
         nn.init.xavier_normal_(self.u_bias)
         nn.init.xavier_normal_(self.v_bias)
 
-    @finaloverride
+    @override
     def forward(
         self,
         seqs: Tensor,
@@ -189,6 +189,7 @@ class RelativePositionSDPA(SDPA):
         return f"model_dim={self.model_dim}, num_heads={self.num_heads}"
 
 
+@final
 class RelativePositionalEncoding(Module):
     """Produces relative positional encodings as described in Appendix B of
     :cite:t:`dai2019transformerxl`."""
@@ -203,13 +204,12 @@ class RelativePositionalEncoding(Module):
         max_seq_len: int,
         *,
         device: Optional[Device] = None,
-        dtype: Optional[DataType] = None,
     ) -> None:
         """
         :param encoding_dim:
             The dimensionality of positional encodings.
         :param max_seq_len:
-            The expected maximum sequence length.
+            The maximum sequence length.
         """
         super().__init__()
 
@@ -222,7 +222,7 @@ class RelativePositionalEncoding(Module):
         self.max_seq_len = max_seq_len
 
         freqs = torch.empty(
-            ((max_seq_len * 2) - 1, encoding_dim), device=device, dtype=dtype
+            ((max_seq_len * 2) - 1, encoding_dim), device=device, dtype=torch.float32
         )
 
         self.register_buffer("freqs", freqs, persistent=False)
@@ -235,12 +235,10 @@ class RelativePositionalEncoding(Module):
 
     def reset_non_persistent_buffers(self) -> None:
         """Reset the non-persistent buffers of the module."""
-        fp32_freqs = self.freqs.float()
+        device, dtype = self.freqs.device, self.freqs.dtype
 
-        device, dtype = fp32_freqs.device, fp32_freqs.dtype
-
-        positive_half = fp32_freqs[: self.max_seq_len]
-        negative_half = fp32_freqs[self.max_seq_len :]
+        positive_half = self.freqs[: self.max_seq_len]
+        negative_half = self.freqs[self.max_seq_len :]
 
         # (S)
         steps = torch.arange(self.max_seq_len, device=device, dtype=dtype)
@@ -265,8 +263,6 @@ class RelativePositionalEncoding(Module):
         torch.sin(-1 * freqs[1:], out=negative_half[:, 0::2])
         torch.cos(-1 * freqs[1:], out=negative_half[:, 1::2])
 
-        self.freqs.copy_(fp32_freqs)
-
     def forward(self, seqs: Tensor) -> Tensor:
         """
         :param seqs:
@@ -283,12 +279,16 @@ class RelativePositionalEncoding(Module):
         """
         seq_len = seqs.size(-2)
 
-        if seq_len > self.max_seq_len:
+        max_seq_len = self.max_seq_len
+
+        if seq_len > max_seq_len:
             raise ValueError(
-                f"The input sequence length must be less than or equal to the maximum sequence length ({self.max_seq_len}), but is {seq_len} instead."
+                f"The input sequence length must be less than or equal to the maximum sequence length ({max_seq_len}), but is {seq_len} instead."
             )
 
-        return self.freqs[self.max_seq_len - seq_len : self.max_seq_len + seq_len - 1]
+        fp32_freqs = self.freqs[max_seq_len - seq_len : max_seq_len + seq_len - 1]
+
+        return fp32_freqs.type_as(seqs)
 
     def extra_repr(self) -> str:
         """:meta private:"""

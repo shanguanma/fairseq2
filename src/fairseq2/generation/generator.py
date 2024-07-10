@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, List, Optional, Protocol, final
 
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
@@ -17,13 +17,48 @@ from torch.utils.hooks import RemovableHandle
 from fairseq2.models.decoder import DecoderModel
 from fairseq2.models.encoder_decoder import EncoderDecoderModel
 from fairseq2.nn.padding import PaddingMask
+from fairseq2.typing import override
 
 
 class SequenceGenerator(ABC):
     """Represents a sequence generator."""
 
-    model: DecoderModel
+    @abstractmethod
+    def __call__(
+        self, prompt_seqs: Tensor, prompt_padding_mask: Optional[PaddingMask]
+    ) -> SequenceGeneratorOutput:
+        """
+        :param prompt_seqs:
+            The prompt sequences. *Shape:* :math:`(N,S)`, where :math:`N` is the
+            batch size and :math:`S` is the sequence length.
+        :param prompt_padding_mask:
+            The padding mask of ``prompt_seqs``. *Shape:* Same as ``prompt_seqs``.
+        """
 
+    @abstractmethod
+    def register_step_hook(self, hook: StepHook) -> RemovableHandle:
+        """Register a step hook on the sequence generator.
+
+        The hook will be called after every generation step.
+
+        :param hook:
+            The hook to register.
+
+        :returns:
+            A handle that can be used to remove the added hook by calling
+            ``handle.remove()``.
+        """
+
+    @property
+    @abstractmethod
+    def model(self) -> DecoderModel:
+        """The associated decoder model."""
+
+
+class AbstractSequenceGenerator(SequenceGenerator):
+    """Provides a skeletal implementation of :class:`SequenceGenerator`."""
+
+    _model: DecoderModel
     _step_hooks: Dict[int, StepHook]
 
     def __init__(self, model: DecoderModel) -> None:
@@ -38,41 +73,27 @@ class SequenceGenerator(ABC):
 
         model.eval()
 
-        self.model = model
+        self._model = model
 
         self._step_hooks = OrderedDict()
 
-    @abstractmethod
-    def __call__(
-        self, prompt_seqs: Tensor, prompt_padding_mask: Optional[PaddingMask]
-    ) -> SequenceGeneratorOutput:
-        """
-        :param prompt_seqs:
-            The prompt sequences. *Shape:* :math:`(N,S)`, where :math:`N` is the
-            batch size and :math:`S` is the sequence length.
-        :param prompt_padding_mask:
-            The padding mask of ``prompt_seqs``. *Shape:* Same as ``prompt_seqs``.
-        """
-
+    @final
+    @override
     def register_step_hook(self, hook: StepHook) -> RemovableHandle:
-        """Register a step hook on the sequence generator.
-
-        The hook will be called after every generation step.
-
-        :param hook:
-            The hook to register.
-
-        :returns:
-            A handle that can be used to remove the added hook by calling
-            ``handle.remove()``.
-        """
         handle = RemovableHandle(self._step_hooks)
 
         self._step_hooks[handle.id] = hook
 
         return handle
 
+    @final
+    @property
+    @override
+    def model(self) -> DecoderModel:
+        return self._model
 
+
+@final
 @dataclass
 class SequenceGeneratorOutput:
     """Holds the output of a sequence generator."""
@@ -80,29 +101,12 @@ class SequenceGeneratorOutput:
     hypotheses: List[List[Hypothesis]]
     """The list of hypothesis generated per prompt, ordered by score."""
 
+    counters: GenerationCounters
+    """The performance counters of the call."""
+
 
 class Seq2SeqGenerator(ABC):
     """Represents a sequence-to-sequence generator."""
-
-    model: EncoderDecoderModel
-
-    _step_hooks: Dict[int, StepHook]
-
-    def __init__(self, model: EncoderDecoderModel) -> None:
-        """
-        :param model:
-            The encoder-decoder model to use for generation.
-        """
-        if model.target_vocab_info.eos_idx is None:
-            raise ValueError(
-                "`model.vocab_info` must have `eos_idx` set for sequence generation."
-            )
-
-        model.eval()
-
-        self.model = model
-
-        self._step_hooks = OrderedDict()
 
     @abstractmethod
     def __call__(
@@ -127,6 +131,7 @@ class Seq2SeqGenerator(ABC):
             The padding mask of ``prompt_seqs``. *Shape:* Same as ``prompt_seqs``.
         """
 
+    @abstractmethod
     def register_step_hook(self, hook: StepHook) -> RemovableHandle:
         """Register a step hook on the sequence-to-sequence generator.
 
@@ -139,13 +144,52 @@ class Seq2SeqGenerator(ABC):
             A handle that can be used to remove the added hook by calling
             ``handle.remove()``.
         """
+
+    @property
+    @abstractmethod
+    def model(self) -> EncoderDecoderModel:
+        """The associated encoder-decoder model."""
+
+
+class AbstractSeq2SeqGenerator(Seq2SeqGenerator):
+    """Provides a skeletal implementation of :class:`Seq2SeqGenerator`."""
+
+    _model: EncoderDecoderModel
+    _step_hooks: Dict[int, StepHook]
+
+    def __init__(self, model: EncoderDecoderModel) -> None:
+        """
+        :param model:
+            The encoder-decoder model to use for generation.
+        """
+        if model.target_vocab_info.eos_idx is None:
+            raise ValueError(
+                "`model.vocab_info` must have `eos_idx` set for sequence generation."
+            )
+
+        model.eval()
+
+        self._model = model
+
+        self._step_hooks = OrderedDict()
+
+    @final
+    @override
+    def register_step_hook(self, hook: StepHook) -> RemovableHandle:
         handle = RemovableHandle(self._step_hooks)
 
         self._step_hooks[handle.id] = hook
 
         return handle
 
+    @final
+    @property
+    @override
+    def model(self) -> EncoderDecoderModel:
+        return self._model
 
+
+@final
 @dataclass
 class Seq2SeqGeneratorOutput:
     hypotheses: List[List[Hypothesis]]
@@ -162,7 +206,11 @@ class Seq2SeqGeneratorOutput:
     where :math:`N` is the batch size and :math:`S_{enc}` is the encoder output
     sequence length."""
 
+    counters: GenerationCounters
+    """The performance counters of the call."""
 
+
+@final
 @dataclass
 class Hypothesis:
     """Represents a hypothesis produced by a sequence generator."""
@@ -175,8 +223,28 @@ class Hypothesis:
     """The score of the hypothesis. *Shape:* Scalar."""
 
     step_scores: Optional[Tensor]
-    """The score of each sequence step. *Shape:* :math:`(S)`, where :math:`S` is
-    the sequence length."""
+    """The score of each sequence step. *Shape:* Same as ``seq``."""
+
+
+@final
+@dataclass
+class GenerationCounters:
+    """Holds the performance counters of a generator call."""
+
+    prefill_size: int = 0
+    """The number of elements processed during the prefill step."""
+
+    num_generated_elements: int = 0
+    """The number of generated elements."""
+
+    generation_time: float = 0
+    """The generation time excluding prefill."""
+
+    cache_size: int = 0
+    """The final size of the incremental cache in bytes."""
+
+    cache_capacity: int = 0
+    """The final reserved capacity of the incremental cache in bytes."""
 
 
 class StepHook(Protocol):

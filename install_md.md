@@ -14,6 +14,9 @@ conda install pytorch==2.0.1  torchaudio==2.0.2 pytorch-cuda=11.7 -c pytorch -c 
 
 ## cuda11.8 pytorch=2.1.1
 conda install pytorch=2.1.1  torchaudio==2.1.1 pytorch-cuda=11.8 -c pytorch -c nvidia -c https://mirrors.bfsu.edu.cn/anaconda/cloud/pytorch/linux-64/ -y
+## cuda12.1 pytorch=2.1.1
+conda install pytorch=2.1.1  torchaudio==2.1.1 pytorch-cuda=12.1 -c pytorch -c nvidia -c https://mirrors.bfsu.edu.cn/anaconda/cloud/pytorch/linux-64/ -y
+
 ```
 #install fairseq2
 ```
@@ -25,7 +28,8 @@ cd fairseq2
 pip install fairseq2n  --pre --upgrade --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.0.1/cu117
 ## cuda11.8 version
 pip install fairseq2n  --pre --upgrade --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.1/cu118
-
+## cuda12.1 version
+pip install fairseq2n  --pre --upgrade --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.1/cu121
 
 #### install fairseq2
 pip install -e .

@@ -4,18 +4,67 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+__version__ = "0.3.0.dev0"
+
 import platform
 import site
-import sys
 from ctypes import CDLL, RTLD_GLOBAL
-from ctypes.util import find_library
 from os import environ
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
-from fairseq2n.config import _CUDA_VERSION, _SUPPORTS_CUDA, _SUPPORTS_IMAGE
+from fairseq2n.config import (
+    _CUDA_VERSION,
+    _SUPPORTS_CUDA,
+    _SUPPORTS_IMAGE,
+    _TORCH_VARIANT,
+    _TORCH_VERSION,
+)
 
-__version__ = "0.2.1.dev0"
+
+def get_lib() -> Path:
+    """Return the directory that contains fairseq2n shared library."""
+    return Path(__file__).parent.joinpath("lib")
+
+
+def get_include() -> Path:
+    """Return the directory that contains fairseq2n header files."""
+    return Path(__file__).parent.joinpath("include")
+
+
+def get_cmake_prefix_path() -> Path:
+    """Return the directory that contains fairseq2n CMake package."""
+    return Path(__file__).parent.joinpath("lib/cmake")
+
+
+def torch_version() -> str:
+    """Return the version of PyTorch that was used to build fairseq2n."""
+    return _TORCH_VERSION
+
+
+def torch_variant() -> str:
+    """Return the variant of PyTorch that was used to build fairseq2n."""
+    return _TORCH_VARIANT
+
+
+def supports_image() -> bool:
+    """Return ``True`` if fairseq2n supports JPEG/PNG decoding."""
+    return _SUPPORTS_IMAGE
+
+
+def supports_cuda() -> bool:
+    """Return ``True`` if fairseq2n supports CUDA."""
+    return _SUPPORTS_CUDA
+
+
+def cuda_version() -> Optional[Tuple[int, int]]:
+    """Return the version of CUDA that fairseq2n supports.
+
+    :returns:
+        The major and minor version segments.
+    """
+    return _CUDA_VERSION
+
 
 # Indicates whether we are run under Sphinx.
 DOC_MODE = False
@@ -46,7 +95,9 @@ def _load_tbb() -> None:
 
     libtbb = _load_shared_library(lib_name)
     if libtbb is None:
-        raise OSError("Intel oneTBB is not found! Check your fairseq2 installation!")
+        raise OSError(
+            "fairseq2 requires Intel oneTBB which is normally installed along with fairseq2 as a dependency. Check your environment and reinstall fairseq2 if necessary."
+        )
 
     _libs.append(libtbb)
 
@@ -61,11 +112,11 @@ def _load_sndfile() -> None:
     if libsndfile is None:
         if "CONDA_PREFIX" in environ:
             raise OSError(
-                "libsndfile is not found! Since you are in a Conda environment, use `conda install -c conda-forge libsndfile==1.0.31` to install it."
+                "fairseq2 requires libsndfile. Since you are in a Conda environment, use `conda install -c conda-forge libsndfile==1.0.31` to install it."
             )
         else:
             raise OSError(
-                "libsndfile is not found! Use your system package manager to install it (e.g. `apt install libsndfile1`)."
+                "fairseq2 requires libsndfile. Use your system package manager to install it (e.g. `apt install libsndfile1`)."
             )
 
     _libs.append(libsndfile)
@@ -82,11 +133,13 @@ def _load_shared_library(lib_name: str) -> Optional[CDLL]:
         except OSError:
             pass
 
-        # On macOS, we also explicitly check the standard Homebrew locations.
+        # On macOS, we also explicitly check the well-known Homebrew locations.
         if platform.system() == "Darwin":
-            for brew_path in ["/usr/local/lib", "/opt/homebrew/lib"]:
+            for brew_path in ["/usr/local/lib", "/opt/homebrew/lib", "~/homebrew"]:
+                path = Path(brew_path, lib_name).expanduser()
+
                 try:
-                    return CDLL(str(Path(brew_path, lib_name)), mode=RTLD_GLOBAL)
+                    return CDLL(str(path), mode=RTLD_GLOBAL)
                 except OSError:
                     pass
 
@@ -115,55 +168,26 @@ def _load_shared_library(lib_name: str) -> Optional[CDLL]:
 _load_shared_libraries()
 
 
-def _check_cuda_runtime() -> None:
-    if not _SUPPORTS_CUDA:
-        return
+def _check_torch_version() -> None:
+    import torch
 
-    assert _CUDA_VERSION is not None
+    def mmp(version: str) -> str:
+        return version.split("+", 1)[0]  # Trim the local label.
 
-    major_cuda_ver, minor_cuda_ver = _CUDA_VERSION
+    source_version, target_version = mmp(torch.__version__), mmp(_TORCH_VERSION)
 
-    libcudart = _load_shared_library("libcudart.so")
-    if libcudart is None:
-        cuda = f"CUDA {major_cuda_ver}.{minor_cuda_ver}"
+    if source_var := torch.version.cuda:
+        # Use only the major and minor version segments.
+        source_variant = "CUDA " + ".".join(source_var.split(".", 2)[:2])
+    else:
+        source_variant = "CPU-only"
 
-        raise OSError(
-            f"fairseq2 is built with {cuda}, but {cuda} runtime cannot be found on your system. Either install {cuda} Toolkit or a CPU-only version of fairseq2 (see https://github.com/facebookresearch/fairseq2#variants)."
+    target_variant = _TORCH_VARIANT
+
+    if source_version != target_version or source_variant != target_variant:
+        raise RuntimeError(
+            f"fairseq2 requires a {target_variant} build of PyTorch {target_version}, but the installed version is a {source_variant} build of PyTorch {source_version}. Either follow the instructions at https://pytorch.org/get-started/locally to update PyTorch, or the instructions at https://github.com/facebookresearch/fairseq2#variants to update fairseq2."
         )
 
 
-_check_cuda_runtime()
-
-
-def get_lib() -> Path:
-    """Return the directory that contains fairseq2n shared library."""
-    return Path(__file__).parent.joinpath("lib")
-
-
-def get_include() -> Path:
-    """Return the directory that contains fairseq2n header files."""
-    return Path(__file__).parent.joinpath("include")
-
-
-def get_cmake_prefix_path() -> Path:
-    """Return the directory that contains fairseq2n CMake package."""
-    return Path(__file__).parent.joinpath("lib/cmake")
-
-
-def supports_image() -> bool:
-    """Return ``True`` if fairseq2n supports JPEG/PNG decoding."""
-    return _SUPPORTS_IMAGE
-
-
-def supports_cuda() -> bool:
-    """Return ``True`` if fairseq2n supports CUDA."""
-    return _SUPPORTS_CUDA
-
-
-def cuda_version() -> Optional[Tuple[int, int]]:
-    """Return the version of CUDA that fairseq2n supports.
-
-    :returns:
-        The major and minor version segments.
-    """
-    return _CUDA_VERSION
+_check_torch_version()

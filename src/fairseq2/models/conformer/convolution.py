@@ -4,17 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Literal, Optional
+from typing import Literal, Optional, final
 
 from torch import Tensor
 from torch.nn import GLU, BatchNorm1d, Conv1d, Module, SiLU
 from torch.nn.functional import pad
 
-from fairseq2.nn.normalization import LayerNorm, StandardLayerNorm
+from fairseq2.nn import LayerNorm, StandardLayerNorm
 from fairseq2.nn.padding import PaddingMask, apply_padding_mask
 from fairseq2.typing import DataType, Device
 
 
+@final
 class ConformerConvolution(Module):
     """Represents a Conformer convolution module as described in
     :cite:t:`https://doi.org/10.48550/arxiv.2005.08100`."""

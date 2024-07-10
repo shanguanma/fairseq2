@@ -6,36 +6,61 @@
 
 from __future__ import annotations
 
-import logging
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, final
+from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, final
 
 from fairseq2.assets.card import AssetCard, AssetCardError
 from fairseq2.assets.metadata_provider import (
     AssetMetadataProvider,
     AssetNotFoundError,
     FileAssetMetadataProvider,
+    PackageAssetMetadataProvider,
 )
-from fairseq2.typing import finaloverride
+from fairseq2.logging import get_log_writer
+from fairseq2.typing import override
+from fairseq2.utils.env import get_path_from_env
+
+log = get_log_writer(__name__)
 
 
 class AssetStore(ABC):
     """Represents a store of assets."""
 
     @abstractmethod
-    def retrieve_card(self, name: str) -> AssetCard:
+    def retrieve_card(
+        self,
+        name: str,
+        *,
+        envs: Optional[Sequence[str]] = None,
+        scope: Literal["all", "global", "user"] = "all",
+    ) -> AssetCard:
         """Retrieve the card of the specified asset.
 
         :param name:
             The name of the asset.
+        :para env:
+            The environments, in order of precedence, in which to retrieve the
+            card. If ``None``, the available environments will be resolved
+            automatically.
+        :param scope:
+            The scope of retrieval.
+        """
+
+    @abstractmethod
+    def retrieve_names(
+        self, *, scope: Literal["all", "global", "user"] = "all"
+    ) -> List[str]:
+        """Retrieve the names of the assets contained in this store.
+
+        :param scope:
+            The scope of retrieval.
         """
 
 
 @final
-class ProviderBackedAssetStore(AssetStore):
-    """Represents a store of assets backed by metadata providers."""
+class StandardAssetStore(AssetStore):
+    """Represents a store of assets."""
 
     env_resolvers: List[EnvironmentResolver]
     metadata_providers: List[AssetMetadataProvider]
@@ -50,39 +75,66 @@ class ProviderBackedAssetStore(AssetStore):
         self.metadata_providers = [metadata_provider]
         self.user_metadata_providers = []
 
-    @finaloverride
-    def retrieve_card(self, name: str) -> AssetCard:
-        if "@" in name:
-            raise ValueError("`name` must not contain the reserved '@' character.")
+    @override
+    def retrieve_card(
+        self,
+        name: str,
+        *,
+        envs: Optional[Sequence[str]] = None,
+        scope: Literal["all", "global", "user"] = "all",
+        extra_provider: Optional[AssetMetadataProvider] = None,
+    ) -> AssetCard:
+        name_env_pair = name.split("@", maxsplit=1)
 
-        envs = self._resolve_envs()
+        name = name_env_pair[0]
 
-        return self._do_retrieve_card(name, envs)
+        # See if we have an environment tag.
+        if len(name_env_pair) == 2:
+            if envs is not None:
+                raise ValueError(
+                    "`name` already contains an environment tag, `envs` must be `None`."
+                )
+
+            envs = [name_env_pair[1]]
+
+        if envs is None:
+            envs = self._resolve_envs()
+
+        return self._do_retrieve_card(name, envs, scope, extra_provider)
 
     def _resolve_envs(self) -> List[str]:
-        envs = []
+        # This is a special, always available environment for users to override
+        # asset metadata. For instance, a user can set the checkpoint path of a
+        # gated model locally by having a same-named asset with a @user suffix.
+        envs = ["user"]
 
-        for resolver in self.env_resolvers:
+        for resolver in reversed(self.env_resolvers):
             if env := resolver():
                 envs.append(env)
 
-        # This is a special, always available environment for users to override
-        # asset metadata. For instance, a user can set the checkpoint path of a
-        # gated model locally by having a same named asset with @user suffix.
-        envs.append("user")
-
         return envs
 
-    def _do_retrieve_card(self, name: str, envs: List[str]) -> AssetCard:
-        metadata = self._get_metadata(name)
+    def _do_retrieve_card(
+        self,
+        name: str,
+        envs: Sequence[str],
+        scope: str,
+        extra_provider: Optional[AssetMetadataProvider],
+    ) -> AssetCard:
+        metadata = self._get_metadata(f"{name}@", scope, extra_provider)
 
         # If we have environment-specific metadata, merge it with `metadata`.
-        for env in envs:
+        for env in reversed(envs):
             try:
-                env_metadata = self._get_metadata(f"{name}@{env}")
+                env_metadata = self._get_metadata(
+                    f"{name}@{env}", scope, extra_provider
+                )
 
                 # Do not allow overriding 'name'.
-                del env_metadata["name"]
+                try:
+                    del env_metadata["name"]
+                except KeyError:
+                    pass
 
                 metadata.update(env_metadata)
             except AssetNotFoundError:
@@ -103,24 +155,57 @@ class ProviderBackedAssetStore(AssetStore):
                     f"The value of the field 'base' of the asset card '{name}' must be of type `{str}`, but is of type `{type(base_name)}` instead."
                 )
 
-            base_card = self._do_retrieve_card(base_name, envs)
+            base_card = self._do_retrieve_card(base_name, envs, scope, extra_provider)
+
+        metadata["name"] = name
 
         return AssetCard(metadata, base_card)
 
-    def _get_metadata(self, name: str) -> Dict[str, Any]:
-        for provider in reversed(self.user_metadata_providers):
+    def _get_metadata(
+        self, name: str, scope: str, extra_provider: Optional[AssetMetadataProvider]
+    ) -> Dict[str, Any]:
+        if extra_provider is not None:
             try:
-                return provider.get_metadata(name)
+                return extra_provider.get_metadata(name)
             except AssetNotFoundError:
-                continue
+                pass
 
-        for provider in reversed(self.metadata_providers):
-            try:
-                return provider.get_metadata(name)
-            except AssetNotFoundError:
-                continue
+        if scope == "all" or scope == "user":
+            for provider in reversed(self.user_metadata_providers):
+                try:
+                    return provider.get_metadata(name)
+                except AssetNotFoundError:
+                    continue
 
-        raise AssetNotFoundError(f"An asset with the name '{name}' cannot be found.")
+        if scope == "all" or scope == "global":
+            for provider in reversed(self.metadata_providers):
+                try:
+                    return provider.get_metadata(name)
+                except AssetNotFoundError:
+                    continue
+
+        if name[-1] == "@":
+            name = name[:-1]
+
+        raise AssetNotFoundError(
+            name, f"An asset with the name '{name}' cannot be found. Run `fairseq2 assets list` to see the list of available assets."  # fmt: skip
+        )
+
+    @override
+    def retrieve_names(
+        self, *, scope: Literal["all", "global", "user"] = "all"
+    ) -> List[str]:
+        names = []
+
+        if scope == "all" or scope == "user":
+            for provider in self.user_metadata_providers:
+                names.extend(provider.get_names())
+
+        if scope == "all" or scope == "global":
+            for provider in self.metadata_providers:
+                names.extend(provider.get_names())
+
+        return names
 
     def clear_cache(self) -> None:
         """Clear the cache of the underlying metadata providers."""
@@ -130,98 +215,72 @@ class ProviderBackedAssetStore(AssetStore):
         for provider in self.user_metadata_providers:
             provider.clear_cache()
 
+    def add_file_metadata_provider(self, path: Path, user: bool = False) -> None:
+        """Add a new :class:`FileAssetMetadataProvider` pointing to ``path``.
+
+        :param path:
+            The directory under which asset metadata is stored.
+        :param user:
+            If ``True``, adds the metadata provider to the user scope.
+        """
+        providers = self.user_metadata_providers if user else self.metadata_providers
+
+        providers.append(FileAssetMetadataProvider(path))
+
+    def add_package_metadata_provider(self, package_name: str) -> None:
+        """Add a new :class:`PackageAssetMetadataProvider` for ``package_name``.
+
+        :param package_name:
+            The name of the package in which asset metadata is stored.
+        """
+        self.metadata_providers.append(PackageAssetMetadataProvider(package_name))
+
 
 class EnvironmentResolver(Protocol):
     """Resolves the environment within which assets should be loaded.
 
     Assets can have varying metadata depending on the environment that they are
-    loaded in due to regulatory or technical requirements.
+    loaded in due to legal or technical requirements.
     """
 
     def __call__(self) -> Optional[str]:
         ...
 
 
-def _create_asset_store() -> ProviderBackedAssetStore:
-    cards_dir = Path(__file__).parent.joinpath("cards")
+def _create_default_asset_store() -> StandardAssetStore:
+    metadata_provider = PackageAssetMetadataProvider("fairseq2.assets.cards")
 
-    metadata_provider = FileAssetMetadataProvider(cards_dir)
-
-    return ProviderBackedAssetStore(metadata_provider)
+    return StandardAssetStore(metadata_provider)
 
 
-asset_store = _create_asset_store()
-
-
-def _get_path_from_env(var_name: str) -> Optional[Path]:
-    pathname = os.getenv(var_name)
-    if not pathname:
-        return None
-
-    try:
-        path = Path(pathname)
-    except ValueError as ex:
-        raise RuntimeError(
-            f"`{var_name}` environment variable must contain a valid pathname, but contains '{pathname}' instead."
-        ) from ex
-
-    if not path.exists():
-        logger = logging.getLogger("fairseq2.assets")
-
-        logger.warning(
-            f"The path '{path}' pointed to by the `{var_name}` environment variable does not exist."
-        )
-
-        return None
-
-    return path
+default_asset_store = _create_default_asset_store()
 
 
 def _load_asset_directory() -> None:
-    asset_dir = _get_path_from_env("FAIRSEQ2_ASSET_DIR")
+    asset_dir = get_path_from_env("FAIRSEQ2_ASSET_DIR", log)
     if asset_dir is None:
-        asset_dir = Path("/etc/fairseq2/assets")
+        asset_dir = Path("/etc/fairseq2/assets").resolve()
         if not asset_dir.exists():
             return
 
-    asset_dir = asset_dir.expanduser().resolve()
-
-    asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
+    default_asset_store.add_file_metadata_provider(asset_dir)
 
 
 _load_asset_directory()
 
 
 def _load_user_asset_directory() -> None:
-    asset_dir = _get_path_from_env("FAIRSEQ2_USER_ASSET_DIR")
+    asset_dir = get_path_from_env("FAIRSEQ2_USER_ASSET_DIR", log)
     if asset_dir is None:
-        asset_dir = _get_path_from_env("XDG_CONFIG_HOME")
+        asset_dir = get_path_from_env("XDG_CONFIG_HOME", log)
         if asset_dir is None:
-            asset_dir = Path("~/.config")
+            asset_dir = Path("~/.config").expanduser()
 
-        asset_dir = asset_dir.expanduser().resolve().joinpath("fairseq2/assets")
+        asset_dir = asset_dir.joinpath("fairseq2/assets").resolve()
         if not asset_dir.exists():
             return
-    else:
-        asset_dir = asset_dir.expanduser().resolve()
 
-    asset_store.user_metadata_providers.append(FileAssetMetadataProvider(asset_dir))
+    default_asset_store.add_file_metadata_provider(asset_dir, user=True)
 
 
 _load_user_asset_directory()
-
-
-# TODO: Move to fairseq2-ext.
-def _load_faircluster() -> None:
-    if "FAIR_ENV_CLUSTER" not in os.environ:
-        return
-
-    asset_store.env_resolvers.append(lambda: "faircluster")
-
-    # This directory is meant to store cluster-wide asset cards.
-    asset_dir = Path("/checkpoint/balioglu/fairseq2-ext/cards")
-    if asset_dir.exists():
-        asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
-
-
-_load_faircluster()

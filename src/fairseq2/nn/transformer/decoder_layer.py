@@ -24,7 +24,7 @@ from fairseq2.nn.transformer.layer_norm import (
 )
 from fairseq2.nn.transformer.multihead_attention import MultiheadAttention
 from fairseq2.nn.transformer.norm_order import TransformerNormOrder
-from fairseq2.typing import DataType, Device, finaloverride
+from fairseq2.typing import DataType, Device, override
 
 
 class TransformerDecoderLayer(Module, ABC):
@@ -112,7 +112,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         ffn: FeedForwardNetwork,
         *,
         scale_residual: bool = False,
-        dropout_p: float = 0.1,
+        dropout_p: float = 0.0,
         norm_order: TransformerNormOrder = TransformerNormOrder.POST,
         layer_norm_factory: Optional[LayerNormFactory] = None,
         device: Optional[Device] = None,
@@ -218,7 +218,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         if self.residual_scale is not None:
             nn.init.ones_(self.residual_scale)
 
-    @finaloverride
+    @override
     def forward(
         self,
         seqs: Tensor,
@@ -344,4 +344,4 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         """:meta private:"""
         s = super().extra_repr()
 
-        return f"{s}, norm_order={self.norm_order}"
+        return f"{s}, norm_order={self.norm_order.name}"

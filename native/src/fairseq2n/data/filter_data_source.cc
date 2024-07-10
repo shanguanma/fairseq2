@@ -23,34 +23,33 @@ filter_data_source::next()
 }
 
 void
-filter_data_source::reset()
+filter_data_source::reset(bool reset_rng)
 {
-    inner_->reset();
+    inner_->reset(reset_rng);
 }
 
 void
-filter_data_source::record_position(tape &t) const
+filter_data_source::record_position(tape &t, bool strict) const
 {
-    inner_->record_position(t);
+    inner_->record_position(t, strict);
 }
 
 void
-filter_data_source::reload_position(tape &t)
+filter_data_source::reload_position(tape &t, bool strict)
 {
-    inner_->reload_position(t);
+    inner_->reload_position(t, strict);
+}
+
+data_source_finitude_type
+filter_data_source::finitude_type() const noexcept
+{
+    return inner_->finitude_type();
 }
 
 bool
 filter_data_source::invoke_function(data &example)
 {
-    try {
-        return predicate_fn_(example);
-    } catch (const data_pipeline_error &) {
-        throw;
-    } catch (const std::exception &) {
-        throw_data_pipeline_error_with_nested(std::move(example), /*recoverable=*/true,
-            "The filter operation has failed. See nested exception for details.");
-    }
+    return predicate_fn_(example);
 }
 
 } // fairseq2n::detail

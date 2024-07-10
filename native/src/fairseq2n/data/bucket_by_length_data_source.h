@@ -24,25 +24,34 @@ public:
         std::unique_ptr<data_source> &&inner,
         std::vector<std::pair<std::size_t, std::size_t>> &&bucket_sizes,
         data_length_fn &&fn,
+        std::size_t min_data_len,
+        bool skip_below_min_examples,
+        bool skip_above_max_examples,
         bool drop_remainder);
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
+
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     std::unique_ptr<data_source> inner_;
     std::vector<std::pair<std::size_t, std::size_t>> bucket_sizes_;
-    std::size_t max_data_len_;
     data_length_fn data_length_fn_;
+    std::size_t min_data_len_;
+    std::size_t max_data_len_;
+    bool skip_below_min_examples_;
+    bool skip_above_max_examples_;
     bool drop_remainder_;
     std::vector<data_list> buckets_{};
 };

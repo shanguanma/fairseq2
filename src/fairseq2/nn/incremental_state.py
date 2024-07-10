@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Type, TypeVar
+from typing import Dict, Optional, Type, TypeVar, final
 
 from torch import Tensor
 from torch.nn import Module
@@ -34,25 +34,46 @@ class IncrementalState(ABC):
             :math:`(N)`, where :math:`N` is the batch size.
         """
 
+    @abstractmethod
+    def size_bytes(self) -> int:
+        """Return the size of the state in bytes."""
+
+    @abstractmethod
+    def capacity_bytes(self) -> int:
+        """Return the reserved capacity of the state in bytes."""
+
 
 T = TypeVar("T", bound=IncrementalState)
 
 
+@final
 class IncrementalStateBag:
     """Holds the module states during incremental decoding."""
 
-    step_nr: int
-    max_num_steps: int
-
+    _step_nr: int
+    _max_num_steps: int
+    _capacity_increment: Optional[int]
     _module_states: Dict[Module, IncrementalState]
 
-    def __init__(self, max_num_steps: int) -> None:
+    def __init__(
+        self, max_num_steps: int, *, capacity_increment: Optional[int] = 16
+    ) -> None:
         """
         :param max_num_steps:
-            The expected maximum number of steps to take.
+            The maximum number of steps to take.
+        :param capacity_increment:
+            The sequence length capacity of state tensors will be incremented by
+            multiples of this value. If ``None``, state tensors will be
+            preallocated with a capacity of ``max_num_steps``.
         """
-        self.step_nr = 0
-        self.max_num_steps = max_num_steps
+        if capacity_increment is not None and capacity_increment < 1:
+            raise ValueError(
+                f"`capacity_increment` must be greater than or equal to 1, but is {capacity_increment} instead."
+            )
+
+        self._step_nr = 0
+        self._max_num_steps = max_num_steps
+        self._capacity_increment = capacity_increment
 
         self._module_states = {}
 
@@ -65,14 +86,14 @@ class IncrementalStateBag:
         :param value:
             The value by which to increment the step number.
         """
-        step_nr = self.step_nr + value
+        step_nr = self._step_nr + value
 
-        if step_nr >= self.max_num_steps:
+        if step_nr >= self._max_num_steps:
             raise ValueError(
-                f"The current step number ({self.step_nr}) with `value` increment must be less than or equal to the maximum number of steps ({self.max_num_steps}), but is {self.step_nr + value} instead."
+                f"The current step number ({self._step_nr}) with `value` increment ({value}) must be less than or equal to the maximum number of steps ({self.max_num_steps}), but is {self._step_nr + value} instead."
             )
 
-        self.step_nr = step_nr
+        self._step_nr = step_nr
 
     def get_state(self, m: Module, kls: Type[T]) -> Optional[T]:
         """Get the state of ``m`` if present in the bag.
@@ -103,9 +124,33 @@ class IncrementalStateBag:
         self._module_states[m] = state
 
     def reorder(self, new_order: Tensor) -> None:
-        """Reorder all module states in the bag.
+        """Reorder the module states.
 
         See :meth:`IncrementalState.reorder` for more information.
         """
         for state in self._module_states.values():
             state.reorder(new_order)
+
+    @property
+    def step_nr(self) -> int:
+        """The current step number."""
+        return self._step_nr
+
+    @property
+    def max_num_steps(self) -> int:
+        """The maximum number of steps."""
+        return self._max_num_steps
+
+    @property
+    def capacity_increment(self) -> Optional[int]:
+        """The sequence length capacity of state tensors will be incremented by
+        multiples of this value."""
+        return self._capacity_increment
+
+    def size_bytes(self) -> int:
+        """Return the size of the state bag in bytes."""
+        return sum(s.size_bytes() for s in self._module_states.values())
+
+    def capacity_bytes(self) -> int:
+        """Return the reserved capacity of the state bag in bytes."""
+        return sum(s.capacity_bytes() for s in self._module_states.values())

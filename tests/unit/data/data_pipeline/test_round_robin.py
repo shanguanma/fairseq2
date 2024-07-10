@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from pathlib import Path
+
 import pytest
 
 from fairseq2.data import DataPipeline, DataPipelineError, read_sequence
@@ -44,6 +46,36 @@ class TestRoundRobinOp:
 
             pipeline.reset()
 
+    def test_op_works_when_pseudo_infinite_pipeline_is_specified(self) -> None:
+        pipeline1 = read_sequence([1, 2, 3, 4]).and_return()
+        pipeline2 = DataPipeline.constant(0).and_return()
+        pipeline3 = read_sequence([0, 2, 4, 6]).and_return()
+
+        pipeline = DataPipeline.round_robin(
+            [pipeline1, pipeline2, pipeline3]
+        ).and_return()
+
+        for _ in range(2):
+            assert list(pipeline) == [1, 0, 0, 2, 0, 2, 3, 0, 4, 4, 0, 6]
+
+            pipeline.reset()
+
+    def test_op_works_when_infinite_pipeline_is_specified(self) -> None:
+        pipeline1 = read_sequence([1, 2, 3, 4]).and_return()
+        pipeline2 = read_sequence([0]).repeat().and_return()
+        pipeline3 = read_sequence([0, 2, 4, 6]).and_return()
+
+        pipeline = DataPipeline.round_robin(
+            [pipeline1, pipeline2, pipeline3]
+        ).and_return()
+
+        for _ in range(2):
+            it = iter(pipeline)
+
+            [next(it) for i in range(15)] == [1, 0, 0, 2, 0, 2, 3, 0, 4, 4, 0, 6, 1, 0, 0]  # fmt: skip
+
+            pipeline.reset()
+
     def test_op_works_when_pipelines_are_empty(self) -> None:
         pipeline1 = read_sequence([]).and_return()
         pipeline2 = read_sequence([]).and_return()
@@ -76,9 +108,7 @@ class TestRoundRobinOp:
 
             pipeline.reset()
 
-    def test_op_works_when_pipelines_have_different_lengths_stop_at_shortest(
-        self,
-    ) -> None:
+    def test_op_works_when_pipelines_stop_at_shortest_is_specified(self) -> None:
         pipeline1 = read_sequence([1, 2, 3, 4]).and_return()
         pipeline2 = read_sequence([5, 6]).and_return()
         pipeline3 = read_sequence([7, 8, 9, 0, 1, 2]).and_return()
@@ -87,7 +117,7 @@ class TestRoundRobinOp:
             [pipeline1, pipeline2, pipeline3], stop_at_shortest=True
         ).and_return()
 
-        seq = [1, 5, 7, 2, 6, 8, 3]
+        seq = [1, 5, 7, 2, 6, 8]
 
         for _ in range(2):
             assert list(pipeline) == seq
@@ -96,8 +126,8 @@ class TestRoundRobinOp:
 
     def test_op_raises_error_when_one_of_the_pipelines_is_broken(self) -> None:
         # Force a non-recoverable error.
-        pipeline1 = read_text(pathname=" &^#").and_return()
-        pipeline2 = read_text(pathname=" &^#").and_return()
+        pipeline1 = read_text(path=Path(" &^#")).and_return()
+        pipeline2 = read_text(path=Path(" &^#")).and_return()
 
         # Break the first pipeline.
         try:
@@ -125,7 +155,7 @@ class TestRoundRobinOp:
 
         it = iter(pipeline)
 
-        # Move the the fifth example.
+        # Move to the fifth example.
         for _ in range(5):
             d = next(it)
 

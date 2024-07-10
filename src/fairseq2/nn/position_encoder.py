@@ -17,7 +17,7 @@ from torch.nn.parameter import Parameter
 
 from fairseq2.nn.incremental_state import IncrementalStateBag
 from fairseq2.nn.padding import PaddingMask
-from fairseq2.typing import DataType, Device, finaloverride
+from fairseq2.typing import DataType, Device, override
 
 
 class PositionEncoder(Module, ABC):
@@ -31,7 +31,7 @@ class PositionEncoder(Module, ABC):
         :param encoding_dim:
             The dimensionality of positional encodings.
         :param max_seq_len:
-            The expected maximum sequence length.
+            The maximum sequence length.
         """
         super().__init__()
 
@@ -189,16 +189,16 @@ class SinusoidalPositionEncoder(PositionEncoder):
 
     def reset_non_persistent_buffers(self) -> None:
         """Reset the non-persistent buffers of the module."""
-        num_sin = self.encoding_dim // 2
+        assert self.max_seq_len is not None
 
         device, dtype = self.freqs.device, self.freqs.dtype
+
+        num_sin = self.encoding_dim // 2
 
         l_half = self.freqs[:, :num_sin]
         r_half = self.freqs[:, num_sin:]
 
         start_step = self._sin_offset
-
-        assert self.max_seq_len is not None
 
         # (S)
         steps = torch.arange(
@@ -219,7 +219,7 @@ class SinusoidalPositionEncoder(PositionEncoder):
         l_half.sin_()
         r_half.cos_()
 
-    @finaloverride
+    @override
     def _do_forward(
         self,
         seqs: Tensor,
@@ -281,7 +281,7 @@ class LearnedPositionEncoder(PositionEncoder):
         """Reset the parameters and buffers of the module."""
         nn.init.normal_(self.weight)
 
-    @finaloverride
+    @override
     def _do_forward(
         self,
         seqs: Tensor,
@@ -309,14 +309,21 @@ class RotaryEncoder(PositionEncoder):
     :cite:t:`https://doi.org/10.48550/arxiv.2104.09864`."""
 
     freqs: Tensor
+    theta: float
 
     def __init__(
         self,
         encoding_dim: int,
         max_seq_len: int,
         *,
+        theta: float = 10_000.0,
         device: Optional[Device] = None,
     ) -> None:
+        """
+        :param theta:
+            The coefficient of the long-term decay as described in section 3.3
+            of the reference paper.
+        """
         super().__init__(encoding_dim, max_seq_len)
 
         if encoding_dim % 2 != 0:
@@ -325,10 +332,12 @@ class RotaryEncoder(PositionEncoder):
             )
 
         freqs = torch.empty(
-            (max_seq_len, encoding_dim // 2), device=device, dtype=torch.complex64
+            (max_seq_len, encoding_dim // 2, 2), device=device, dtype=torch.float32
         )
 
         self.register_buffer("freqs", freqs, persistent=False)
+
+        self.theta = theta
 
         self.reset_parameters()
 
@@ -338,14 +347,15 @@ class RotaryEncoder(PositionEncoder):
 
     def reset_non_persistent_buffers(self) -> None:
         """Reset the non-persistent buffers of the module."""
-        device = self.freqs.device
-
         assert self.max_seq_len is not None
 
-        # As of PyTorch 2.0, `torch.polar` does not support meta device, but we
-        # do not want to lose benefit of lazy initialization.
+        device = self.freqs.device
+
+        # As of PyTorch 2.0, `torch.polar` does not support meta device.
         if device.type == "meta":
             return
+
+        complex_freqs = torch.view_as_complex(self.freqs)
 
         # (S)
         steps = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
@@ -355,15 +365,15 @@ class RotaryEncoder(PositionEncoder):
             0, self.encoding_dim, step=2, device=device, dtype=torch.float32
         )
 
-        freqs = 1.0 / (10000.0 ** (indices / self.encoding_dim))
+        freqs = 1.0 / (self.theta ** (indices / self.encoding_dim))
 
         # (S) x (E / 2) -> (S, E / 2)
         freqs = torch.outer(steps, freqs)
 
         # (S, E / 2)
-        torch.polar(torch.ones_like(freqs), freqs, out=self.freqs)
+        torch.polar(torch.ones_like(freqs), freqs, out=complex_freqs)
 
-    @finaloverride
+    @override
     def _do_forward(
         self,
         seqs: Tensor,
@@ -378,12 +388,16 @@ class RotaryEncoder(PositionEncoder):
         else:
             start_step = state_bag.step_nr
 
+        complex_freqs = torch.view_as_complex(self.freqs)
+
+        complex_freqs = complex_freqs[start_step : start_step + seq_len]
+
         # (*, S, E) -> (*, S, E / 2, 2)
         seqs = seqs.unflatten(-1, (-1, 2))
 
         complex_seqs = torch.view_as_complex(seqs.float())
 
-        complex_seqs = complex_seqs * self.freqs[start_step : start_step + seq_len]
+        complex_seqs = complex_seqs * complex_freqs
 
         # (*, S, E / 2, 2) -> (*, S, E)
         fp32_seqs = torch.view_as_real(complex_seqs).flatten(-2)

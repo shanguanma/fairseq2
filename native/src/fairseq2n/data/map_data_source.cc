@@ -15,12 +15,14 @@
 namespace fairseq2n::detail {
 
 map_data_source::map_data_source(
-    std::unique_ptr<data_source> &&inner, map_fn &&fn, std::size_t num_parallel_calls)
-  : inner_{std::move(inner)}, map_fn_{std::move(fn)}, num_parallel_calls_{num_parallel_calls}
+    std::unique_ptr<data_source> &&inner, std::vector<map_fn> &&fns, std::size_t num_parallel_calls)
+  : inner_{std::move(inner)},
+    map_fns_{std::move(fns)},
+    num_parallel_calls_{num_parallel_calls}
 {
     buffer_.reserve(num_parallel_calls);
 
-    buffer_iter_ = buffer_.begin();
+    buffer_pos_ = buffer_.begin();
 }
 
 std::optional<data>
@@ -28,7 +30,7 @@ map_data_source::next()
 {
     if (num_parallel_calls_ <= 1) {
         while (std::optional<data> maybe_example = inner_->next()) {
-            maybe_example = invoke_function(*std::move(maybe_example));
+            maybe_example = invoke_function(*std::move(maybe_example), 0);
             if (maybe_example)
                 return maybe_example;
         }
@@ -38,9 +40,9 @@ map_data_source::next()
 
     do {
         // Yield a buffered example.
-        for (; buffer_iter_ < buffer_.end(); ++buffer_iter_) {
-            if (*buffer_iter_)
-                return std::move(*buffer_iter_++);
+        for (; buffer_pos_ < buffer_.end(); ++buffer_pos_) {
+            if (*buffer_pos_)
+                return std::move(*buffer_pos_++);
         }
     // If we have exhausted all buffered examples, try to refill the buffer.
     } while (fill_buffer());
@@ -49,33 +51,47 @@ map_data_source::next()
 }
 
 void
-map_data_source::reset()
+map_data_source::reset(bool reset_rng)
 {
     buffer_.clear();
 
-    buffer_iter_ = buffer_.begin();
+    buffer_pos_ = buffer_.begin();
 
-    inner_->reset();
+    inner_->reset(reset_rng);
 }
 
 void
-map_data_source::record_position(tape &t) const
+map_data_source::record_position(tape &t, bool strict) const
 {
-    t.record(buffer_);
+    if (strict) {
+        t.record(buffer_);
 
-    t.record(buffer_iter_ - buffer_.begin());
+        t.record(buffer_pos_ - buffer_.begin());
+    }
 
-    inner_->record_position(t);
+    inner_->record_position(t, strict);
 }
 
 void
-map_data_source::reload_position(tape &t)
+map_data_source::reload_position(tape &t, bool strict)
 {
-    buffer_ = t.read<std::vector<std::optional<data>>>();
+    if (strict) {
+        buffer_ = t.read<std::vector<std::optional<data>>>();
 
-    buffer_iter_ = buffer_.begin() + t.read<std::ptrdiff_t>();
+        buffer_pos_ = buffer_.begin() + t.read<std::ptrdiff_t>();
+    } else {
+        buffer_.clear();
 
-    inner_->reload_position(t);
+        buffer_pos_ = buffer_.begin();
+    }
+
+    inner_->reload_position(t, strict);
+}
+
+data_source_finitude_type
+map_data_source::finitude_type() const noexcept
+{
+    return inner_->finitude_type();
 }
 
 bool
@@ -98,7 +114,7 @@ map_data_source::fill_buffer()
     auto apply_function = [this](std::size_t begin, std::size_t end)
     {
         for (auto i = begin; i < end; ++i)
-            buffer_[i] = invoke_function(*std::move(buffer_[i]));
+            buffer_[i] = invoke_function(*std::move(buffer_[i]), i);
     };
 
     // Avoid threading overhead if we have just one example.
@@ -107,22 +123,15 @@ map_data_source::fill_buffer()
     else
         parallel_for<std::size_t>(apply_function, buffer_.size());
 
-    buffer_iter_ = buffer_.begin();
+    buffer_pos_ = buffer_.begin();
 
     return true;
 }
 
 std::optional<data>
-map_data_source::invoke_function(data &&example)
+map_data_source::invoke_function(data &&example, std::size_t fn_idx)
 {
-    try {
-        return map_fn_(std::move(example));
-    } catch (const data_pipeline_error &) {
-        throw;
-    } catch (const std::exception &) {
-        throw_data_pipeline_error_with_nested(std::nullopt, /*recoverable=*/true,
-            "The map operation has failed. See nested exception for details.");
-    }
+    return map_fns_[fn_idx](std::move(example));
 }
 
 }  // namespace fairseq2n::detail

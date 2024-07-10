@@ -25,6 +25,7 @@ target_sources(fairseq2n
         data/data_length_extractor.cc
         data/data_pipeline.cc
         data/data_source.cc
+        data/dynamic_bucket_data_source.cc
         data/element_mapper.cc
         data/element_selector.cc
         data/file.cc
@@ -35,10 +36,10 @@ target_sources(fairseq2n
         data/list_data_source.cc
         data/map_data_source.cc
         data/memory_stream.cc
-        data/composite_data_source.cc
         data/prefetch_data_source.cc
         data/py.cc
         data/record_reader.cc
+        data/repeat_data_source.cc
         data/round_robin_data_source.cc
         data/sample_data_source.cc
         data/shard_data_source.cc

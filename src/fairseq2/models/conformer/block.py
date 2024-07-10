@@ -10,7 +10,7 @@ from torch import Tensor
 from torch.nn import Dropout
 
 from fairseq2.models.conformer.convolution import ConformerConvolution
-from fairseq2.nn.normalization import LayerNorm
+from fairseq2.nn import LayerNorm
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.transformer import (
     AttentionMask,
@@ -49,7 +49,7 @@ class ConformerBlock(TransformerEncoderLayer):
         conv: ConformerConvolution,
         ffn2: FeedForwardNetwork,
         *,
-        dropout_p: float = 0.1,
+        dropout_p: float = 0.0,
         layer_norm_factory: Optional[LayerNormFactory] = None,
         device: Optional[Device] = None,
         dtype: Optional[DataType] = None,

@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Protocol, TypeVar, Union, final
+from typing import Dict, Optional, Protocol, TypeVar, Union, final
 
 from fairseq2.assets import (
     AssetCard,
@@ -15,38 +16,90 @@ from fairseq2.assets import (
     AssetDownloadManager,
     AssetError,
     AssetStore,
+    default_asset_store,
+    default_download_manager,
 )
+from fairseq2.assets.utils import retrieve_asset_card
 
-DatasetT = TypeVar("DatasetT", covariant=True)
+DatasetT = TypeVar("DatasetT")
+
+DatasetT_co = TypeVar("DatasetT_co", covariant=True)
 
 
-class DatasetLoader(Protocol[DatasetT]):
+class DatasetLoader(Protocol[DatasetT_co]):
     """Loads datasets of type ``DatasetT```."""
 
     def __call__(
         self,
-        dataset_name_or_card: Union[str, AssetCard],
+        dataset_name_or_card: Union[str, AssetCard, Path],
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
-    ) -> DatasetT:
+    ) -> DatasetT_co:
         """
         :param dataset_name_or_card:
-            The name or asset card of the dataset to load.
+            The name, asset card, or path to the asset card file of the dataset
+            to load.
         :param force:
             If ``True``, downloads the dataset even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and uses the cached dataset.
         :param progress:
             If ``True``, displays a progress bar to stderr.
         """
 
 
-class DatasetFactory(Protocol[DatasetT]):
-    """Constructs datasets of type ``DatasetT``."""
+class AbstractDatasetLoader(ABC, DatasetLoader[DatasetT]):
+    """Provides a skeletal implementation of :class:`DatasetLoader`."""
 
-    def __call__(self, path: Path, card: AssetCard) -> DatasetT:
+    _asset_store: AssetStore
+    _download_manager: AssetDownloadManager
+
+    def __init__(
+        self,
+        *,
+        asset_store: Optional[AssetStore] = None,
+        download_manager: Optional[AssetDownloadManager] = None,
+    ) -> None:
+        """
+        :param asset_store:
+            The asset store where to check for available datasets. If ``None``,
+            the default asset store will be used.
+        :param download_manager:
+            The download manager. If ``None``, the default download manager will
+            be used.
+        """
+        self._asset_store = asset_store or default_asset_store
+        self._download_manager = download_manager or default_download_manager
+
+    @final
+    def __call__(
+        self,
+        dataset_name_or_card: Union[str, AssetCard, Path],
+        *,
+        force: bool = False,
+        progress: bool = True,
+    ) -> DatasetT:
+        card = retrieve_asset_card(dataset_name_or_card, self._asset_store)
+
+        dataset_uri = card.field("data").as_uri()
+
+        try:
+            path = self._download_manager.download_dataset(
+                dataset_uri, card.name, force=force, progress=progress
+            )
+        except ValueError as ex:
+            raise AssetCardError(
+                f"The value of the field 'data' of the asset card '{card.name}' must be a URI. See nested exception for details."
+            ) from ex
+
+        try:
+            return self._load(path, card)
+        except ValueError as ex:
+            raise AssetError(
+                f"The {card.name} dataset cannot be loaded. See nested exception for details."
+            ) from ex
+
+    @abstractmethod
+    def _load(self, path: Path, card: AssetCard) -> DatasetT:
         """
         :param path:
             The path to the dataset.
@@ -56,117 +109,62 @@ class DatasetFactory(Protocol[DatasetT]):
 
 
 @final
-class StandardDatasetLoader(DatasetLoader[DatasetT]):
-    """Loads datasets of type ``DatasetT``."""
-
-    _asset_store: AssetStore
-    _download_manager: AssetDownloadManager
-    _factory: DatasetFactory[DatasetT]
-
-    def __init__(
-        self,
-        asset_store: AssetStore,
-        download_manager: AssetDownloadManager,
-        factory: DatasetFactory[DatasetT],
-    ) -> None:
-        """
-        :param asset_store:
-            The asset store where to check for available datasets.
-        :param download_manager:
-            The download manager.
-        :param factory:
-            The factory to construct datasets.
-        """
-        self._asset_store = asset_store
-        self._download_manager = download_manager
-        self._factory = factory
-
-    def __call__(
-        self,
-        dataset_name_or_card: Union[str, AssetCard],
-        *,
-        force: bool = False,
-        cache_only: bool = False,
-        progress: bool = True,
-    ) -> DatasetT:
-        if isinstance(dataset_name_or_card, AssetCard):
-            card = dataset_name_or_card
-        else:
-            card = self._asset_store.retrieve_card(dataset_name_or_card)
-
-        uri = card.field("uri").as_uri()
-
-        try:
-            path = self._download_manager.download_dataset(
-                uri, card.name, force=force, cache_only=cache_only, progress=progress
-            )
-        except ValueError as ex:
-            raise AssetCardError(
-                f"The value of the field 'uri' of the asset card '{card.name}' is not valid. See nested exception for details."
-            ) from ex
-
-        try:
-            return self._factory(path, card)
-        except ValueError as ex:
-            raise AssetError(
-                f"The {card.name} dataset cannot be loaded. See nested exception for details."
-            ) from ex
-
-
-@final
 class DelegatingDatasetLoader(DatasetLoader[DatasetT]):
     """Loads datasets of type ``DatasetT`` using registered loaders."""
 
     _asset_store: AssetStore
     _loaders: Dict[str, DatasetLoader[DatasetT]]
 
-    def __init__(self, asset_store: AssetStore) -> None:
+    def __init__(self, *, asset_store: Optional[AssetStore] = None) -> None:
         """
         :param asset_store:
-            The asset store where to check for available datasets.
+            The asset store where to check for available datasets. If ``None``,
+            the default asset store will be used.
         """
-        self._asset_store = asset_store
+        self._asset_store = asset_store or default_asset_store
 
         self._loaders = {}
 
     def __call__(
         self,
-        dataset_name_or_card: Union[str, AssetCard],
+        dataset_name_or_card: Union[str, AssetCard, Path],
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> DatasetT:
-        if isinstance(dataset_name_or_card, AssetCard):
-            card = dataset_name_or_card
-        else:
-            card = self._asset_store.retrieve_card(dataset_name_or_card)
+        card = retrieve_asset_card(dataset_name_or_card, self._asset_store)
 
-        dataset_type = card.field("dataset_type").as_(str)
+        family = card.field("dataset_family").as_(str)
 
         try:
-            loader = self._loaders[dataset_type]
+            loader = self._loaders[family]
         except KeyError:
-            raise RuntimeError(
-                f"The dataset type '{dataset_type}' has no registered loader."
+            raise AssetError(
+                f"The value of the field 'dataset_family' of the asset card '{card.name}' must be a supported dataset family, but '{family}' has no registered loader."
             )
 
-        return loader(card, force=force, cache_only=cache_only, progress=progress)
+        return loader(card, force=force, progress=progress)
 
-    def register_loader(
-        self, dataset_type: str, loader: DatasetLoader[DatasetT]
-    ) -> None:
+    def register(self, family: str, loader: DatasetLoader[DatasetT]) -> None:
         """Register a dataset loader to use with this loader.
 
-        :param dataset_type:
-            The dataset type. If the 'dataset_type' field of an asset card
+        :param family:
+            The dataset type. If the 'dataset_family' field of an asset card
             matches this value, the specified ``loader`` will be used.
         :param loader:
             The dataset loader.
         """
-        if dataset_type in self._loaders:
+        if family in self._loaders:
             raise ValueError(
-                f"`dataset_type` must be a unique dataset type, but '{dataset_type}' is already registered."
+                f"`family` must be a unique dataset family name, but '{family}' has already a registered loader."
             )
 
-        self._loaders[dataset_type] = loader
+        self._loaders[family] = loader
+
+    def supports(self, dataset_name_or_card: Union[str, AssetCard, Path]) -> bool:
+        """Return ``True`` if the specified dataset has a registered loader."""
+        card = retrieve_asset_card(dataset_name_or_card, self._asset_store)
+
+        family = card.field("dataset_family").as_(str)
+
+        return family in self._loaders

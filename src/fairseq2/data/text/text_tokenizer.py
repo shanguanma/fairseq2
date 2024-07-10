@@ -8,44 +8,26 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import (
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Protocol,
-    Sequence,
-    TypeVar,
-    Union,
-    final,
-)
+from typing import Dict, List, Optional, Protocol, Sequence, TypeVar, Union, final
 
 from torch import Tensor
 
 from fairseq2.assets import (
     AssetCard,
     AssetCardError,
-    AssetCardFieldNotFoundError,
     AssetDownloadManager,
     AssetError,
     AssetStore,
     default_asset_store,
+    default_download_manager,
 )
+from fairseq2.assets.utils import retrieve_asset_card
 from fairseq2.data.vocabulary_info import VocabularyInfo
-from fairseq2.typing import Device
+from fairseq2.typing import Device, override
 
 
 class TextTokenizer(ABC):
     """Represents a tokenizer to encode and decode text."""
-
-    _vocab_info: VocabularyInfo
-
-    def __init__(self, vocab_info: VocabularyInfo) -> None:
-        """
-        :param vocab_info:
-            The vocabulary information associated with the tokenizer.
-        """
-        self._vocab_info = vocab_info
 
     @abstractmethod
     def create_encoder(
@@ -64,9 +46,9 @@ class TextTokenizer(ABC):
         subclasses for more information.
 
         :param task:
-            The task for which to generate token indices. Typically, multi-task
-            jobs use ``task`` to distinguish between different tasks such as
-            'translation' or 'transcription'.
+            The task for which to generate token indices. Typically, ``task`` is
+            used to distinguish between different tasks such as 'translation' or
+            'transcription'.
         :param lang:
             The language of generated token indices. Typically, multilingual
             translation tasks use ``lang`` to distinguish between different
@@ -97,8 +79,27 @@ class TextTokenizer(ABC):
     def create_decoder(self) -> TextTokenDecoder:
         """Create a token decoder."""
 
+    @property
+    @abstractmethod
+    def vocab_info(self) -> VocabularyInfo:
+        """The vocabulary information associated with the tokenizer."""
+
+
+class AbstractTextTokenizer(TextTokenizer):
+    """Provides a skeletal implementation of :class:`TextTokenizer`."""
+
+    _vocab_info: VocabularyInfo
+
+    def __init__(self, vocab_info: VocabularyInfo) -> None:
+        """
+        :param vocab_info:
+            The vocabulary information associated with the tokenizer.
+        """
+        self._vocab_info = vocab_info
+
     @final
     @property
+    @override
     def vocab_info(self) -> VocabularyInfo:
         """The vocabulary information associated with the tokenizer."""
         return self._vocab_info
@@ -152,36 +153,89 @@ class TextTokenDecoder(ABC):
         """
 
 
-class TextTokenizerLoader(Protocol):
-    """Loads text tokenizers."""
+TextTokenizerT = TypeVar("TextTokenizerT", bound=TextTokenizer)
+
+TextTokenizerT_co = TypeVar("TextTokenizerT_co", bound=TextTokenizer, covariant=True)
+
+
+class TextTokenizerLoader(Protocol[TextTokenizerT_co]):
+    """Loads text tokenizers of type ``TextTokenizerT``."""
 
     def __call__(
         self,
-        tokenizer_name_or_card: Union[str, AssetCard],
+        tokenizer_name_or_card: Union[str, AssetCard, Path],
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
-    ) -> TextTokenizer:
+    ) -> TextTokenizerT_co:
         """
         :param tokenizer_name_or_card:
-            The name or asset card of the tokenizer to load.
+            The name, asset card, or path to the asset card file of the
+            tokenizer to load.
         :param force:
             If ``True``, downloads the tokenizer even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and uses the cached tokenizer.
         :param progress:
             If ``True``, displays a progress bar to stderr.
         """
 
 
-TextTokenizerT = TypeVar("TextTokenizerT", bound=TextTokenizer, covariant=True)
+class AbstractTextTokenizerLoader(ABC, TextTokenizerLoader[TextTokenizerT]):
+    """Provides a skeletal implementation of :class:`TextTokenizerLoader`."""
 
+    _asset_store: AssetStore
+    _download_manager: AssetDownloadManager
 
-class TextTokenizerFactory(Protocol[TextTokenizerT]):
-    """Constructs text tokenizers of type ``TextTokenizerT``."""
+    def __init__(
+        self,
+        *,
+        asset_store: Optional[AssetStore] = None,
+        download_manager: Optional[AssetDownloadManager] = None,
+    ) -> None:
+        """
+        :param asset_store:
+            The asset store where to check for available tokenizers. If ``None``,
+            the default asset store will be used.
+        :param download_manager:
+            The download manager. If ``None``, the default download manager will
+            be used.
+        """
+        self._asset_store = asset_store or default_asset_store
+        self._download_manager = download_manager or default_download_manager
 
-    def __call__(self, path: Path, card: AssetCard) -> TextTokenizerT:
+    @final
+    def __call__(
+        self,
+        tokenizer_name_or_card: Union[str, AssetCard, Path],
+        *,
+        force: bool = False,
+        progress: bool = True,
+    ) -> TextTokenizerT:
+        card = retrieve_asset_card(tokenizer_name_or_card, self._asset_store)
+
+        tokenizer_ref = card.field("tokenizer_ref").get_as_(str)
+        if tokenizer_ref is not None:
+            return self(tokenizer_ref, force=force, progress=progress)
+
+        tokenizer_uri = card.field("tokenizer").as_uri()
+
+        try:
+            path = self._download_manager.download_tokenizer(
+                tokenizer_uri, card.name, force=force, progress=progress
+            )
+        except ValueError as ex:
+            raise AssetCardError(
+                f"The value of the field 'tokenizer' of the asset card '{card.name}' must be a URI. See nested exception for details."
+            ) from ex
+
+        try:
+            return self._load(path, card)
+        except ValueError as ex:
+            raise AssetError(
+                f"The {card.name} tokenizer cannot be loaded. See nested exception for details."
+            ) from ex
+
+    @abstractmethod
+    def _load(self, path: Path, card: AssetCard) -> TextTokenizerT:
         """
         :param path:
             The path to the tokenizer.
@@ -191,130 +245,76 @@ class TextTokenizerFactory(Protocol[TextTokenizerT]):
 
 
 @final
-class StandardTextTokenizerLoader(TextTokenizerLoader, Generic[TextTokenizerT]):
-    """Loads text tokenizers of type ``TokenizerT``."""
+class DelegatingTextTokenizerLoader(TextTokenizerLoader[TextTokenizerT]):
+    """Loads text tokenizers of type ``TextTokenizerT`` using registered loaders."""
 
     _asset_store: AssetStore
-    _download_manager: AssetDownloadManager
-    _factory: TextTokenizerFactory[TextTokenizerT]
+    _loaders: Dict[str, TextTokenizerLoader[TextTokenizerT]]
 
-    def __init__(
-        self,
-        asset_store: AssetStore,
-        download_manager: AssetDownloadManager,
-        factory: TextTokenizerFactory[TextTokenizerT],
-    ) -> None:
+    def __init__(self, *, asset_store: Optional[AssetStore] = None) -> None:
         """
         :param asset_store:
-            The asset store where to check for available tokenizers.
-        :param download_manager:
-            The download manager.
-        :param factory:
-            The factory to construct tokenizers.
+            The asset store where to check for available tokenizers. If ``None``,
+            the default asset store will be used.
         """
-        self._asset_store = asset_store
-        self._download_manager = download_manager
-        self._factory = factory
-
-    def __call__(
-        self,
-        tokenizer_name_or_card: Union[str, AssetCard],
-        *,
-        force: bool = False,
-        cache_only: bool = False,
-        progress: bool = True,
-    ) -> TextTokenizerT:
-        if isinstance(tokenizer_name_or_card, AssetCard):
-            card = tokenizer_name_or_card
-        else:
-            card = self._asset_store.retrieve_card(tokenizer_name_or_card)
-
-        uri = card.field("tokenizer").as_uri()
-
-        try:
-            path = self._download_manager.download_tokenizer(
-                uri, card.name, force=force, cache_only=cache_only, progress=progress
-            )
-        except ValueError as ex:
-            raise AssetCardError(
-                f"The value of the field 'tokenizer' of the asset card '{card.name}' is not valid. See nested exception for details."
-            ) from ex
-
-        try:
-            return self._factory(path, card)
-        except ValueError as ex:
-            raise AssetError(
-                f"The {card.name} tokenizer cannot be loaded. See nested exception for details."
-            ) from ex
-
-
-@final
-class DelegatingTextTokenizerLoader(TextTokenizerLoader):
-    """Loads text tokenizers using registered loaders."""
-
-    _asset_store: AssetStore
-    _loaders: Dict[str, TextTokenizerLoader]
-
-    def __init__(self, asset_store: AssetStore) -> None:
-        """
-        :param asset_store:
-            The asset store where to check for available tokenizers.
-        """
-        self._asset_store = asset_store
+        self._asset_store = asset_store or default_asset_store
 
         self._loaders = {}
 
     def __call__(
         self,
-        tokenizer_name_or_card: Union[str, AssetCard],
+        tokenizer_name_or_card: Union[str, AssetCard, Path],
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
-    ) -> TextTokenizer:
-        if isinstance(tokenizer_name_or_card, AssetCard):
-            card = tokenizer_name_or_card
-        else:
-            card = self._asset_store.retrieve_card(tokenizer_name_or_card)
+    ) -> TextTokenizerT:
+        card = retrieve_asset_card(tokenizer_name_or_card, self._asset_store)
 
-        tokenizer_type = None
+        ref = card.field("tokenizer_ref").get_as_(str)
+        if ref is not None:
+            return self(ref, force=force, progress=progress)
 
-        for field in ["tokenizer_type", "model_type", "dataset_type"]:
-            try:
-                tokenizer_type = card.field(field).as_(str)
-            except AssetCardFieldNotFoundError:
-                continue
-
-        if tokenizer_type is None:
-            raise AssetCardFieldNotFoundError(
-                f"The asset card '{card.name}' must have a field named 'tokenizer_type', 'model_type', or 'dataset_type'."
-            )
+        family = card.field("tokenizer_family").as_(str)
 
         try:
-            loader = self._loaders[tokenizer_type]
+            loader = self._loaders[family]
         except KeyError:
-            raise RuntimeError(
-                f"The text tokenizer type '{tokenizer_type}' has no registered loader."
+            raise AssetError(
+                f"The value of the field 'tokenizer_family' of the asset card '{card.name}' must be a supported tokenizer family, but '{family}' has no registered loader."
             )
 
-        return loader(card, force=force, cache_only=cache_only, progress=progress)
+        return loader(card, force=force, progress=progress)
 
-    def register_loader(self, tokenizer_type: str, loader: TextTokenizerLoader) -> None:
+    def register(
+        self, family: str, loader: TextTokenizerLoader[TextTokenizerT]
+    ) -> None:
         """Register a tokenizer loader to use with this loader.
 
-        :param tokenizer_type:
-            The tokenizer type. If the 'tokenizer_type', 'model_type', or
-            'dataset_type' field of an asset card matches this value, the
+        :param family:
+            The tokenizer family. If the 'tokenizer_family', 'model_family', or
+            'dataset_family' field of an asset card matches this value, the
             specified ``loader`` will be used.
         :param loader:
             The tokenizer loader.
         """
-        if tokenizer_type in self._loaders:
+        if family in self._loaders:
             raise ValueError(
-                f"`tokenizer_type` must be a unique text tokenizer type, but '{tokenizer_type}' is already registered."
+                f"`family` must be a unique text tokenizer family name, but '{family}' has already a registered loader."
             )
 
-        self._loaders[tokenizer_type] = loader
+        self._loaders[family] = loader
+
+    def supports(self, tokenizer_name_or_card: Union[str, AssetCard, Path]) -> bool:
+        """Return ``True`` if the specified tokenizer has a registered loader."""
+        card = retrieve_asset_card(tokenizer_name_or_card, self._asset_store)
+
+        ref = card.field("tokenizer_ref").get_as_(str)
+        if ref is not None:
+            return self.supports(ref)
+
+        family = card.field("tokenizer_family").as_(str)
+
+        return family in self._loaders
 
 
-load_text_tokenizer = DelegatingTextTokenizerLoader(default_asset_store)
+load_text_tokenizer = DelegatingTextTokenizerLoader[TextTokenizer]()

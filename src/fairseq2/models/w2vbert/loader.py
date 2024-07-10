@@ -8,25 +8,32 @@ from typing import Any, Dict
 
 import torch
 
-from fairseq2.assets import default_asset_store, default_download_manager
-from fairseq2.models.utils import ConfigLoader, ModelLoader
+from fairseq2.models.config_loader import StandardModelConfigLoader
+from fairseq2.models.loader import DenseModelLoader, load_model
 from fairseq2.models.utils.checkpoint import convert_fairseq_checkpoint
-from fairseq2.models.w2vbert.builder import (
+from fairseq2.models.w2vbert.archs import w2vbert_archs
+from fairseq2.models.w2vbert.factory import (
+    W2VBERT_FAMILY,
     W2VBertConfig,
     create_w2vbert_model,
-    w2vbert_archs,
 )
-from fairseq2.models.w2vbert.model import W2VBertModel
+
+load_w2vbert_config = StandardModelConfigLoader(
+    family=W2VBERT_FAMILY, config_kls=W2VBertConfig, arch_configs=w2vbert_archs
+)
 
 
 def convert_w2vbert_checkpoint(
     checkpoint: Dict[str, Any], config: W2VBertConfig
 ) -> Dict[str, Any]:
-    """Convert a fairseq w2v-BERT checkpoint to fairseq2."""
-    state_dict = checkpoint["model"]
-
+    """Convert a fairseq w2v-BERT checkpoint to fairseq2 format."""
     # Check if we have a fairseq2 checkpoint.
-    if "w2v2_model.final_target_proj.weight" in state_dict:
+    try:
+        state_dict = checkpoint["model"]
+    except KeyError:
+        return checkpoint
+
+    if "mlm_proj.weight" not in state_dict:
         return checkpoint
 
     state_dict["w2v2_model.quantizer.num_updates"] = torch.zeros((), device="cpu")
@@ -66,13 +73,10 @@ def convert_w2vbert_checkpoint(
     return convert_fairseq_checkpoint(checkpoint, key_map)
 
 
-load_w2vbert_config = ConfigLoader[W2VBertConfig](default_asset_store, w2vbert_archs)
-
-load_w2vbert_model = ModelLoader[W2VBertModel, W2VBertConfig](
-    default_asset_store,
-    default_download_manager,
-    load_w2vbert_config,
-    create_w2vbert_model,
-    convert_w2vbert_checkpoint,
-    mmap=True,
+load_w2vbert_model = DenseModelLoader(
+    config_loader=load_w2vbert_config,
+    factory=create_w2vbert_model,
+    checkpoint_converter=convert_w2vbert_checkpoint,
 )
+
+load_model.register(W2VBERT_FAMILY, load_w2vbert_model)

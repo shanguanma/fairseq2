@@ -12,7 +12,7 @@ from fairseq2n import DOC_MODE
 from torch import Tensor
 from typing_extensions import NotRequired
 
-from fairseq2.memory import MemoryBlock
+from fairseq2.data.memory import MemoryBlock
 from fairseq2.typing import DataType, Device
 
 if TYPE_CHECKING or DOC_MODE:
@@ -21,6 +21,7 @@ if TYPE_CHECKING or DOC_MODE:
     class AudioDecoder:
         def __init__(
             self,
+            keepdim: bool = False,
             dtype: Optional[DataType] = None,
             device: Optional[Device] = None,
             pin_memory: bool = False,

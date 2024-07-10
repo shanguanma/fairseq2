@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <ATen/Generator.h>
@@ -19,22 +21,25 @@ namespace fairseq2n::detail {
 class sample_data_source final : public data_source {
 public:
     explicit
-    sample_data_source(std::vector<data_pipeline> &&pipelines, std::vector<float32> &&weights);
+    sample_data_source(
+        std::vector<data_pipeline> &&pipelines,
+        std::vector<float32> &&weights,
+        std::optional<std::uint64_t> maybe_seed);
 
     std::optional<data>
     next() override;
 
     void
-    reset() override;
+    reset(bool reset_rng) override;
 
     void
-    record_position(tape &t) const override;
+    record_position(tape &t, bool strict) const override;
 
     void
-    reload_position(tape &t) override;
+    reload_position(tape &t, bool strict) override;
 
-    bool
-    is_infinite() const noexcept override;
+    data_source_finitude_type
+    finitude_type() const noexcept override;
 
 private:
     std::size_t
@@ -48,12 +53,13 @@ private:
 
 private:
     std::vector<data_pipeline> pipelines_;
-    at::Generator generator_;
     std::vector<float32> weight_cumsums_;
     std::vector<data> buffer_{};
     std::vector<bool> is_epoch_done_;
     bool is_eod_ = false;
-    bool is_infinite_;
+    data_source_finitude_type finitude_type_;
+    std::uint64_t seed_;
+    at::Generator generator_;
 };
 
 }  // namespace fairseq2n::detail

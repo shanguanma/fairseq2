@@ -11,15 +11,10 @@ from typing import Optional, Tuple, final
 from torch import Tensor
 from torch.nn import Dropout, Module
 
-from fairseq2.nn.embedding import Embedding
+from fairseq2.nn import Embedding, LayerNorm, PositionEncoder
 from fairseq2.nn.incremental_state import IncrementalStateBag
-from fairseq2.nn.normalization import LayerNorm
 from fairseq2.nn.padding import PaddingMask
-from fairseq2.nn.position_encoder import PositionEncoder
-from fairseq2.nn.transformer.layer_norm import (
-    LayerNormFactory,
-    create_standard_layer_norm,
-)
+from fairseq2.nn.transformer import LayerNormFactory, create_standard_layer_norm
 from fairseq2.typing import DataType, Device, override
 
 
@@ -89,7 +84,7 @@ class TransformerEmbeddingFrontend(TransformerFrontend):
         *,
         no_scale: bool = False,
         layer_norm: bool = False,
-        dropout_p: float = 0.1,
+        dropout_p: float = 0.0,
         layer_norm_factory: Optional[LayerNormFactory] = None,
         device: Optional[Device] = None,
         dtype: Optional[DataType] = None,

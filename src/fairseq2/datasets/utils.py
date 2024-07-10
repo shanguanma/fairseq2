@@ -5,28 +5,31 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from logging import Logger
 
 import torch
 
 from fairseq2.gang import Gang
+from fairseq2.logging import LogWriter
 
 
-def all_eod(eod: bool, gang: Gang, logger: Logger) -> bool:
-    """Return ``True`` if all processes in ``gang`` have reached end of data."""
-    if gang.size == 1:
-        return eod
+def _reduce_num_batches(num_batches: int, gang: Gang, log: LogWriter) -> int:
+    all_num_batches = torch.zeros((gang.size,), device=gang.device, dtype=torch.int64)
 
-    eods = torch.empty((gang.size,), device=gang.device, dtype=torch.bool)
+    num_batches_ = torch.tensor(num_batches, device=gang.device)
 
-    gang.all_gather(eods, torch.tensor(eod, device=gang.device))
+    gang.all_gather(all_num_batches, num_batches_)
 
-    if eods.any():
-        if logger.isEnabledFor(logging.DEBUG) and not eods.all():
-            ranks = ", ".join(str(r) for r in eods.nonzero().squeeze(1).tolist())
+    min_num_batches = int(all_num_batches.min())
+    if min_num_batches != 0:
+        return min_num_batches
 
-            logger.debug(f"End of data reached at rank(s) {ranks}.")
+    # If not all processes have reached end of data, report the ones that have
+    # reached for debugging purposes.
+    if log.is_enabled_for(logging.DEBUG) and all_num_batches.sum() > 0:
+        ranks = all_num_batches.bool().logical_not_().nonzero().squeeze(-1).tolist()
 
-        return True
+        s = ", ".join(str(r) for r in ranks)
 
-    return False
+        log.debug("End of data reached at rank(s) {}.", s)
+
+    return 0

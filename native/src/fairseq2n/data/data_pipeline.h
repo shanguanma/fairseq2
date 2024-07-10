@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -44,16 +45,16 @@ public:
     next();
 
     void
-    reset();
+    reset(bool reset_rng = false);
 
     void
-    record_position(tape &t) const;
+    record_position(tape &t, bool strict = true) const;
 
     void
     reload_position(tape &t);
 
-    bool
-    is_infinite() const;
+    data_source_finitude_type
+    finitude_type() const;
 
     bool
     is_broken() const noexcept
@@ -85,7 +86,10 @@ public:
     round_robin(std::vector<data_pipeline> pipelines, bool stop_at_shortest = false);
 
     static data_pipeline_builder
-    sample(std::vector<data_pipeline> pipelines, std::optional<std::vector<float>> weights = {});
+    sample(
+        std::vector<data_pipeline> pipelines,
+        std::optional<std::vector<float>> maybe_weights = {},
+        std::optional<std::uint64_t> maybe_seed = {});
 
     static data_pipeline_builder
     zip(
@@ -108,6 +112,8 @@ using data_length_fn = std::function<std::size_t(const data &)>;
 using map_fn = std::function<data(data &&)>;
 
 using predicate_fn = std::function<bool(const data &)>;
+
+using cost_fn = std::function<float64(const data &)>;
 
 using yield_fn = std::function<data_pipeline(const data &)>;
 
@@ -133,23 +139,36 @@ public:
     bucket_by_length(
         std::vector<std::pair<std::size_t, std::size_t>> bucket_sizes,
         data_length_fn fn,
-        bool skip_long_examples = false,
+        std::size_t min_data_len = 1,
+        bool skip_below_min_examples = false,
+        bool skip_above_max_examples = false,
+        bool drop_remainder = false) &&;
+
+    data_pipeline_builder
+    dynamic_bucket(
+        float64 threshold,
+        cost_fn fn,
+        std::optional<std::size_t> maybe_min_num_examples = std::nullopt,
+        std::optional<std::size_t> maybe_max_num_examples = std::nullopt,
         bool drop_remainder = false) &&;
 
     data_pipeline_builder
     filter(predicate_fn fn) &&;
 
     data_pipeline_builder
-    map(map_fn fn, std::size_t num_parallel_calls = 1) &&;
+    map(const map_fn &fn, std::size_t num_parallel_calls = 1) &&;
 
     data_pipeline_builder
     prefetch(std::size_t num_examples) &&;
 
     data_pipeline_builder
-    shard(std::size_t shard_idx, std::size_t num_shards) &&;
+    repeat(std::optional<std::size_t> num_repeats = std::nullopt, bool reset_rng = false) &&;
 
     data_pipeline_builder
-    shuffle(std::size_t shuffle_window, bool strict, bool enabled = true) &&;
+    shard(std::size_t shard_idx, std::size_t num_shards, bool allow_uneven = false) &&;
+
+    data_pipeline_builder
+    shuffle(std::size_t shuffle_window, std::optional<std::uint64_t> maybe_seed = {}) &&;
 
     data_pipeline_builder
     skip(std::size_t num_examples) &&;
@@ -208,7 +227,7 @@ private:
 };
 
 FAIRSEQ2_API data_pipeline_builder
-list_files(std::string pathname, std::optional<std::string> maybe_pattern = {});
+list_files(const std::filesystem::path &path, std::optional<std::string> maybe_pattern = {});
 
 FAIRSEQ2_API data_pipeline_builder
 read_list(data_list list);

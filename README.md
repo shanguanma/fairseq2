@@ -15,26 +15,8 @@ to train custom models for translation, summarization, language modeling, and
 other content generation tasks. It is also the successor of
 [fairseq](https://github.com/facebookresearch/fairseq).
 
-## What is new in v0.2?
-* An implementation of Mistral 7B and Mistral 7B instruct ([arXiv](https://arxiv.org/abs/2310.06825))
-  models with Grouped-Query Attention and Sliding Window Attention. [Check out](./recipes/mistral)
-  the terminal-based interactive demo chat application under recipes.
-* An interactive terminal-based [demo chat application](./recipes/llama) for
-  LLaMA 7B Chat with system prompt support.
-* A new, unified, and efficient [sequence generation API](./src/fairseq2/generation)
-  for both decoder and encoder-decoder models with Beam Search, TopK Sampling,
-  and TopP (a.k.a. Nucleus) Sampling along with toxicity prevention features.
-* Support for PyTorch SDPA/Flash Attention in Relative Position SDPA and Shaw
-  Relative Position SDPA.
-* Lazy [padding mask](./src/fairseq2/nn/padding.py#L18) and [attention mask](./src/fairseq2/nn/transformer/attention_mask.py#L17)
-  initialization for more efficient integration with fused SDPA implementations.
-* A new [sampling operator](./src/fairseq2/data/data_pipeline.py#L115) in our
-  C++-based data pipeline API.
-
-
 ## Getting Started
-You can find our full documentation including tutorials and API reference
-[here](https://facebookresearch.github.io/fairseq2/stable).
+Coming soon...
 
 For recent changes, you can check out our [changelog](CHANGELOG.md).
 
@@ -42,13 +24,15 @@ For recent changes, you can check out our [changelog](CHANGELOG.md).
 ## Models
 As of today, the following models are available in fairseq2:
 
- * [LLaMA](recipes/llama)
- * [LLaMA 2](recipes/llama)
- * [Mistral 7B](recipes/mistral)
+ * [LLaMA](src/fairseq2/models/llama)
+ * [LLaMA 2](src/fairseq2/models/llama)
+ * [LLaMA 3](src/fairseq2/models/llama)
+ * [Mistral 7B](src/fairseq2/mistral)
  * [NLLB-200](src/fairseq2/models/nllb)
  * [S2T Transformer + Conformer](src/fairseq2/models/s2t_transformer)
  * [w2v-BERT](src/fairseq2/models/w2vbert)
  * [wav2vec 2.0](src/fairseq2/models/wav2vec2)
+ * [wav2vec 2.0 ASR](src/fairseq2/models/wav2vec2/asr)
 
 fairseq2 is also used by various external projects such as:
 
@@ -107,21 +91,21 @@ matrix shows the supported combinations.
   <tbody>
     <tr>
       <td rowspan=3><code>HEAD</code></td>
-      <td><code>2.2.0</code>, <code>2.2.1</code></td>
+      <td><code>2.3.0</code></td>
       <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
       <td><code>cpu</code>, <code>cu118</code>, <code>cu121</code></td>
       <td><code>x86_64</code></td>
     </tr>
     <tr>
-      <td><code>2.1.2</code></td>
+      <td><code>2.2.0</code>, <code>2.2.1</code>, <code>2.2.2</code></td>
       <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
       <td><code>cpu</code>, <code>cu118</code>, <code>cu121</code></td>
       <td><code>x86_64</code></td>
     </tr>
     <tr>
-      <td><code>2.0.1</code></td>
+      <td><code>2.1.0</code>, <code>2.1.1</code>, <code>2.1.2</code></td>
       <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
-      <td><code>cpu</code>, <code>cu117</code>, <code>cu118</code></td>
+      <td><code>cpu</code>, <code>cu118</code>, <code>cu121</code></td>
       <td><code>x86_64</code></td>
     </tr>
     <tr>
@@ -150,14 +134,13 @@ matrix shows the supported combinations.
 
 To install a specific combination, first follow the installation instructions on
 [pytorch.org](https://pytorch.org/get-started/locally) for the desired PyTorch
-version, and then use the following command (shown for PyTorch `2.2.1` and
+version, and then use the following command (shown for PyTorch `2.3.0` and
 variant `cu118`):
 
 ```sh
 pip install fairseq2\
-  --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.2.1/cu118
+  --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.3.0/cu118
 ```
-
 
 > [!WARNING]
 > fairseq2 relies on the C++ API of PyTorch which has no API/ABI compatibility
@@ -171,12 +154,12 @@ pip install fairseq2\
 For Linux, we also host nightly builds on FAIR's package repository. The
 supported variants are identical to the ones listed in *Variants* above. Once
 you have installed the desired PyTorch version, you can use the following
-command to install the corresponding nightly package  (shown for PyTorch `2.2.1`
+command to install the corresponding nightly package  (shown for PyTorch `2.3.0`
 and variant `cu118`):
 
 ```sh
 pip install fairseq2\
-  --pre --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.2.1/cu118
+  --pre --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.3.0/cu118
 ```
 
 
@@ -203,6 +186,56 @@ hosted on PyPI.
 At this time, we do not offer a pre-built package for Intel-based Mac computers.
 Please refer to [Install From Source](INSTALL_FROM_SOURCE.md) to learn how to
 build and install fairseq2 on Intel machines.
+
+### Variants
+Besides PyPI, fairseq2 also has pre-built packages available for different
+PyTorch versions hosted on FAIR's package repository. The following matrix shows
+the supported combinations.
+
+<table>
+  <thead>
+    <th>fairseq2</th>
+    <th>PyTorch</th>
+    <th>Python</th>
+    <th>Arch</th>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>HEAD</code></td>
+      <td><code>2.3.0</code></td>
+      <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
+      <td><code>arm64</code></td>
+    </tr>
+  </tbody>
+</table>
+
+To install a specific combination, first follow the installation instructions on
+[pytorch.org](https://pytorch.org/get-started/locally) for the desired PyTorch
+version, and then use the following command (shown for PyTorch `2.3.0`):
+
+```sh
+pip install fairseq2\
+  --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.3.0/cpu
+```
+
+> [!WARNING]
+> fairseq2 relies on the C++ API of PyTorch which has no API/ABI compatibility
+> between releases. This means **you have to install the fairseq2 variant that
+> exactly matches your PyTorch version**. Otherwise, you might experience issues
+> like immediate process crashes or spurious segfaults. For the same reason, if
+> you upgrade your PyTorch version, you must also upgrade your fairseq2
+> installation.
+
+### Nightlies
+For macOS, we also host nightly builds on FAIR's package repository. The
+supported variants are identical to the ones listed in *Variants* above. Once
+you have installed the desired PyTorch version, you can use the following
+command to install the corresponding nightly package  (shown for PyTorch `2.3.0`):
+
+```sh
+pip install fairseq2\
+  --pre --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.3.0/cpu
+```
 
 
 ## Installing on Windows

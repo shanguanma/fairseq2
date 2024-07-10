@@ -6,22 +6,32 @@
 
 from typing import Any, Dict
 
-from fairseq2.assets import default_asset_store, default_download_manager
-from fairseq2.data.text import load_basic_sentencepiece_tokenizer, load_text_tokenizer
-from fairseq2.models.mistral.builder import (
+from fairseq2.data.text import (
+    default_basic_sentencepiece_tokenizer_loader,
+    load_text_tokenizer,
+)
+from fairseq2.models.config_loader import StandardModelConfigLoader
+from fairseq2.models.loader import DenseModelLoader, load_model
+from fairseq2.models.mistral.archs import mistral_archs
+from fairseq2.models.mistral.factory import (
+    MISTRAL_FAMILY,
     MistralConfig,
     create_mistral_model,
-    mistral_archs,
 )
-from fairseq2.models.transformer import TransformerDecoderModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_model_state_dict
+
+load_mistral_config = StandardModelConfigLoader(
+    family=MISTRAL_FAMILY, config_kls=MistralConfig, arch_configs=mistral_archs
+)
 
 
 def convert_mistral_checkpoint(
     checkpoint: Dict[str, Any], config: MistralConfig
 ) -> Dict[str, Any]:
-    """Convert a reference Mistral checkpoint to fairseq2."""
+    """Convert a reference Mistral checkpoint to fairseq2 format."""
+    if "output.weight" not in checkpoint:
+        return checkpoint
+
     key_map = {
         # fmt: off
         r"^layers\.([0-9]+)\.attention\.wq\.":    r"decoder.layers.\1.self_attn.q_proj.",
@@ -44,17 +54,14 @@ def convert_mistral_checkpoint(
     return {"model": checkpoint}
 
 
-load_mistral_config = ConfigLoader[MistralConfig](default_asset_store, mistral_archs)
-
-load_mistral_model = ModelLoader[TransformerDecoderModel, MistralConfig](
-    default_asset_store,
-    default_download_manager,
-    load_mistral_config,
-    create_mistral_model,
-    convert_mistral_checkpoint,
-    mmap=True,
+load_mistral_model = DenseModelLoader(
+    config_loader=load_mistral_config,
+    factory=create_mistral_model,
+    checkpoint_converter=convert_mistral_checkpoint,
 )
 
-load_mistral_tokenizer = load_basic_sentencepiece_tokenizer
+load_model.register(MISTRAL_FAMILY, load_mistral_model)
 
-load_text_tokenizer.register_loader("mistral", load_mistral_tokenizer)
+load_mistral_tokenizer = default_basic_sentencepiece_tokenizer_loader
+
+load_text_tokenizer.register(MISTRAL_FAMILY, load_mistral_tokenizer)

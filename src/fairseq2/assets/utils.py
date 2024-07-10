@@ -4,41 +4,78 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
-import os
-import re
 from pathlib import Path
-from typing import Final, Optional
+from typing import Optional, Union
 
-_SCHEME_REGEX: Final = re.compile("^[a-zA-Z0-9]+://")
+from fairseq2.assets.card import AssetCard
+from fairseq2.assets.metadata_provider import (
+    AssetMetadataError,
+    AssetNotFoundError,
+    InProcAssetMetadataProvider,
+    _load_metadata_file,
+)
+from fairseq2.assets.store import AssetStore, StandardAssetStore, default_asset_store
 
 
-def _starts_with_scheme(s: str) -> bool:
-    return re.match(_SCHEME_REGEX, s) is not None
+def retrieve_asset_card(
+    name_or_card: Union[str, AssetCard, Path], store: Optional[AssetStore] = None
+) -> AssetCard:
+    """Retrieve the specified asset.
 
+    :param name_or_card:
+        The name, card, or path to the card file of the asset to load.
+    :param store:
+        The asset store where to check for available assets. If ``None``, the
+        default asset store will be used.
+    """
+    if isinstance(name_or_card, AssetCard):
+        return name_or_card
 
-def _get_path_from_env(var_name: str, missing_ok: bool = False) -> Optional[Path]:
-    pathname = os.getenv(var_name)
-    if not pathname:
-        return None
+    if store is None:
+        store = default_asset_store
+
+    if isinstance(name_or_card, Path):
+        return _card_from_file(name_or_card, store)
+
+    name = name_or_card
 
     try:
-        path = Path(pathname)
-    except ValueError as ex:
-        raise RuntimeError(
-            f"The value of the `{var_name}` environment variable must be a pathname, but is '{pathname}' instead."
-        ) from ex
+        return store.retrieve_card(name)
+    except AssetNotFoundError:
+        pass
 
-    resolved_path = path.expanduser().resolve()
+    try:
+        file = Path(name)
+    except ValueError:
+        file = None
 
-    if not resolved_path.exists():
-        if missing_ok:
-            return resolved_path
+    if file is not None:
+        if (file.suffix == ".yaml" or file.suffix == ".yml") and file.exists():
+            return _card_from_file(file, store)
 
-        logger = logging.getLogger("fairseq2.assets")
+    raise AssetNotFoundError(name, f"An asset with the name '{name}' cannot be found.")
 
-        logger.warning(f"The path '{path}' pointed to by the `{var_name}` environment variable does not exist.")  # fmt: skip
 
-        return None
+def _card_from_file(file: Path, store: AssetStore) -> AssetCard:
+    if not isinstance(store, StandardAssetStore):
+        raise ValueError(
+            f"`store` must be of type `{StandardAssetStore}` when `name_or_card` is a pathname, but is of type {type(store)} instead."
+        )
 
-    return resolved_path
+    all_metadata = _load_metadata_file(file)
+
+    if len(all_metadata) != 1:
+        raise AssetMetadataError(
+            f"The specified asset metadata file '{file}' contains metadata for more than one asset."
+        )
+
+    name, metadata = all_metadata[0]
+
+    metadata["name"] = name
+
+    metadata_provider = InProcAssetMetadataProvider([metadata], name="argument")
+
+    # Strip the environment tag.
+    name, _ = name.split("@", maxsplit=1)
+
+    return store.retrieve_card(name, extra_provider=metadata_provider)

@@ -9,25 +9,29 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <mutex>
 
 #include <ATen/CPUGeneratorImpl.h>
 #include <ATen/Context.h>
 
+#include "fairseq2n/data/detail/rng.h"
 #include "fairseq2n/utils/cast.h"
 
 namespace fairseq2n::detail {
 
 shuffle_data_source::shuffle_data_source(
-    std::unique_ptr<data_source> &&inner, std::size_t shuffle_window, bool strict) noexcept
-  : inner_{std::move(inner)}, strict_{strict}
+    std::unique_ptr<data_source> &&inner,
+    std::size_t shuffle_window,
+    std::optional<std::uint64_t> maybe_seed)
+  : inner_{std::move(inner)}
 {
     if (shuffle_window == 0)
         shuffle_window_ = std::numeric_limits<std::size_t>::max();
     else
         shuffle_window_ = shuffle_window;
 
-    generator_ = at::globalContext().defaultGenerator(at::kCPU);
+    seed_ = maybe_seed ? *maybe_seed : pseudo_random();
+
+    generator_ = at::make_generator<at::CPUGeneratorImpl>(seed_);
 }
 
 std::optional<data>
@@ -88,7 +92,7 @@ shuffle_data_source::next()
 }
 
 void
-shuffle_data_source::reset()
+shuffle_data_source::reset(bool reset_rng)
 {
     buffer_.clear();
 
@@ -97,13 +101,16 @@ shuffle_data_source::reset()
 
     fill_buffer_ = true;
 
-    inner_->reset();
+    if (reset_rng)
+        generator_.set_current_seed(seed_);
+
+    inner_->reset(reset_rng);
 }
 
 void
-shuffle_data_source::record_position(tape &t) const
+shuffle_data_source::record_position(tape &t, bool strict) const
 {
-    if (strict_) {
+    if (strict) {
         t.record(buffer_);
 
         t.record(buffer_pos_ - buffer_.begin());
@@ -112,13 +119,17 @@ shuffle_data_source::record_position(tape &t) const
         t.record(fill_buffer_);
     }
 
-    inner_->record_position(t);
+    t.record(seed_);
+
+    t.record(generator_.get_state());
+
+    inner_->record_position(t, strict);
 }
 
 void
-shuffle_data_source::reload_position(tape &t)
+shuffle_data_source::reload_position(tape &t, bool strict)
 {
-    if (strict_) {
+    if (strict) {
         buffer_ = t.read<data_list>();
 
         buffer_pos_ = buffer_.begin() + t.read<std::ptrdiff_t>();
@@ -134,13 +145,17 @@ shuffle_data_source::reload_position(tape &t)
         fill_buffer_ = true;
     }
 
-    inner_->reload_position(t);
+    seed_ = t.read<std::uint64_t>();
+
+    generator_.set_state(t.read<at::Tensor>());
+
+    inner_->reload_position(t, strict);
 }
 
-bool
-shuffle_data_source::is_infinite() const noexcept
+data_source_finitude_type
+shuffle_data_source::finitude_type() const noexcept
 {
-    return inner_->is_infinite();
+    return inner_->finitude_type();
 }
 
 void
@@ -148,9 +163,7 @@ shuffle_data_source::shuffle()
 {
     using std::swap;
 
-    std::lock_guard<std::mutex> guard{generator_.mutex()};
-
-    auto *gen = at::check_generator<at::CPUGeneratorImpl>(generator_);
+    auto *gen = generator_.get<at::CPUGeneratorImpl>();
 
     std::size_t s = static_cast<std::size_t>(buffer_end_ - buffer_.begin());
 

@@ -13,28 +13,28 @@ namespace fairseq2n::detail {
 std::optional<data>
 constant_data_source::next()
 {
-    if (key_)
-        return data_dict{{*key_, example_}};
+    if (maybe_key_)
+        return data_dict{{*maybe_key_, example_}};
 
     return example_;
 }
 
 void
-constant_data_source::reset()
+constant_data_source::reset(bool)
 {}
 
 void
-constant_data_source::record_position(tape &) const
+constant_data_source::record_position(tape &, bool) const
 {}
 
 void
-constant_data_source::reload_position(tape &)
+constant_data_source::reload_position(tape &, bool)
 {}
 
-bool
-constant_data_source::is_infinite() const noexcept
+data_source_finitude_type
+constant_data_source::finitude_type() const noexcept
 {
-    return true;
+    return data_source_finitude_type::pseudo_infinite;
 }
 
 }

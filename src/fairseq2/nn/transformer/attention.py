@@ -4,22 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Generator, Optional, Protocol, Tuple, final
+from typing import Iterator, Optional, Protocol, Tuple, final
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
-from torch.nn.functional import dropout, softmax
+from torch.nn.functional import dropout, scaled_dot_product_attention, softmax
 
+from fairseq2.logging import get_log_writer
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.transformer.attention_mask import AttentionMask, CausalAttentionMask
 from fairseq2.typing import override
 
-logger = logging.getLogger(__name__)
+log = get_log_writer(__name__)
 
 
 class SDPA(Module, ABC):
@@ -79,6 +78,9 @@ class TorchSDPA(SDPA):
 
     attn_dropout_p: float
 
+    _has_warned: bool
+    _enable_memory_efficient: bool
+
     def __init__(self, *, attn_dropout_p: float = 0.0) -> None:
         """
         :param attn_dropout_p:
@@ -86,9 +88,14 @@ class TorchSDPA(SDPA):
         """
         super().__init__()
 
-        self._has_warned = False
-
         self.attn_dropout_p = attn_dropout_p
+
+        self._has_warned = False
+        self._enable_memory_efficient = True
+
+    def enable_memory_efficient(self, value: bool = True) -> None:
+        """Enable or disable the memory efficient SDPA implementation."""
+        self._enable_memory_efficient = value
 
     @override
     def forward(
@@ -103,7 +110,7 @@ class TorchSDPA(SDPA):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         if needs_weights:
             if not self._has_warned:
-                logger.warning("`TorchSDPA` has to fall back to the naive SDPA implementation because of `needs_weights` set to `True`.")  # fmt: skip
+                log.warning("`TorchSDPA` has to fall back to the naive SDPA implementation because of `needs_weights` set to `True`.")  # fmt: skip
 
                 self._has_warned = True
 
@@ -126,20 +133,17 @@ class TorchSDPA(SDPA):
         is_causal = False
 
         if key_padding_mask is not None:
-            mask = key_padding_mask.materialize()
+            mask = key_padding_mask.materialize_as(seqs)
 
             # (N, S_kv) -> (N, 1, 1, S_kv)
             mask = mask[:, None, None, :]
 
-            # (N, 1, 1, S_kv) -> (N, H, S, S_kv)
-            mask = mask.expand(-1, seqs.size(1), seqs.size(2), -1)
+            # (N, 1, 1, S_kv) -> (N, H, 1, S_kv)
+            mask = mask.expand(-1, seqs.size(1), -1, -1)
 
             if attn_mask is not None:
-                # ([H], S, S_kv)
-                m = attn_mask.materialize()
-
-                # (N, H, S, S_kv)
-                mask = torch.where(mask, m, -torch.inf)
+                # (N, H, 1, S_kv) + ([H], S, S_kv) -> (N, H, S, S_kv)
+                mask = mask + attn_mask.materialize()
         elif isinstance(attn_mask, CausalAttentionMask):
             # PyTorch SDPA supports only full causal attention.
             if attn_mask.full_attention():
@@ -155,20 +159,49 @@ class TorchSDPA(SDPA):
         else:
             mask = None
 
-        attn = F.scaled_dot_product_attention(  # type: ignore[attr-defined]
-            seqs,
-            keys,
-            values,
-            attn_mask=mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-        )
+        with _with_memory_efficient_kernel(self._enable_memory_efficient):
+            attn = scaled_dot_product_attention(
+                seqs,
+                keys,
+                values,
+                attn_mask=mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+            )
 
         return attn, None
 
     def extra_repr(self) -> str:
         """:meta private:"""
-        return f"attn_dropout_p={self.attn_dropout_p}"
+        return f"attn_dropout_p={self.attn_dropout_p:G}"
+
+
+def enable_memory_efficient_torch_sdpa(module: Module, value: bool) -> None:
+    """Enable or disable the memory efficient PyTorch SDPA implementation."""
+    for m in module.modules():
+        if isinstance(m, TorchSDPA):
+            m.enable_memory_efficient(value)
+
+
+try:
+    from torch.backends.cuda import enable_mem_efficient_sdp, mem_efficient_sdp_enabled
+
+    @contextmanager
+    def _with_memory_efficient_kernel(value: bool) -> Iterator[None]:
+        original_value = mem_efficient_sdp_enabled()
+
+        enable_mem_efficient_sdp(value)
+
+        try:
+            yield
+        finally:
+            enable_mem_efficient_sdp(original_value)
+
+except ImportError:
+
+    @contextmanager
+    def _with_memory_efficient_kernel(value: bool) -> Iterator[None]:
+        yield
 
 
 @final
@@ -210,7 +243,7 @@ class NaiveSDPA(SDPA):
 
     def extra_repr(self) -> str:
         """:meta private:"""
-        return f"attn_dropout_p={self.attn_dropout_p}"
+        return f"attn_dropout_p={self.attn_dropout_p:G}"
 
 
 def _naive_scaled_dot_product_attention(
@@ -295,7 +328,7 @@ def create_default_sdpa(*, attn_dropout_p: float = 0.0) -> SDPA:
 
 
 @contextmanager
-def default_sdpa_factory(factory: Optional[SDPAFactory]) -> Generator[None, None, None]:
+def default_sdpa_factory(factory: Optional[SDPAFactory]) -> Iterator[None]:
     """Set a temporary default :class:`SDPA` factory."""
     original_factory = _sdpa_factory
 

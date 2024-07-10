@@ -6,8 +6,10 @@
 
 from typing import Optional, final
 
+from rich.console import Console
 from torch import Tensor
 
+from fairseq2.console import get_console
 from fairseq2.data.text import TextTokenDecoder
 
 
@@ -18,11 +20,14 @@ class _StdOutPrintHook:
     _text_decoder: TextTokenDecoder
     _prev_text_len: int
     _first_print: bool
+    _console: Console
 
     def __init__(self, text_decoder: TextTokenDecoder) -> None:
         self._text_decoder = text_decoder
         self._prev_text_len = 0
         self._first_print = True
+
+        self._console = get_console()
 
     def __call__(
         self,
@@ -31,10 +36,7 @@ class _StdOutPrintHook:
         step_scores: Optional[Tensor],
         prefill: bool,
     ) -> None:
-        if len(prompt_indices) > 1:
-            raise RuntimeError(
-                "`StdOutPrintHook` can only be used with a single prompt."
-            )
+        assert len(prompt_indices) == 1
 
         # Do not print anything during prompt prefill.
         if prefill:
@@ -60,8 +62,6 @@ class _StdOutPrintHook:
         if text_len == prev_text_len:
             return
 
-        text = str(text)
-
         text = text[prev_text_len - text_len :]
 
         # Some models output several whitespace characters after the prompt.
@@ -72,4 +72,4 @@ class _StdOutPrintHook:
 
             self._first_print = False
 
-        print(text, end="", flush=True)
+        self._console.print(text, highlight=False, end="")

@@ -25,49 +25,57 @@ yield_from_data_source::next()
 }
 
 void
-yield_from_data_source::reset()
+yield_from_data_source::reset(bool reset_rng)
 {
     maybe_current_example_ = {};
 
     data_pipeline_ = {};
 
-    inner_->reset();
+    inner_->reset(reset_rng);
 }
 
 void
-yield_from_data_source::record_position(tape &t) const
+yield_from_data_source::record_position(tape &t, bool strict) const
 {
-    t.record(maybe_current_example_);
+    if (strict) {
+        t.record(maybe_current_example_);
 
-    if (maybe_current_example_)
-        data_pipeline_.record_position(t);
-
-    inner_->record_position(t);
-}
-
-void
-yield_from_data_source::reload_position(tape &t)
-{
-    maybe_current_example_ = t.read<std::optional<data>>();
-
-    if (maybe_current_example_) {
-        // The assumption we make is that the recorded example will fully
-        // reconstruct the original yielded-from data pipeline.
-        data_pipeline_ = invoke_function(*maybe_current_example_);
-
-        // With that assumption, we restore the recorded state.
-        data_pipeline_.reload_position(t);
+        if (maybe_current_example_)
+            data_pipeline_.record_position(t, strict);
     }
-    else
+
+    inner_->record_position(t, strict);
+}
+
+void
+yield_from_data_source::reload_position(tape &t, bool strict)
+{
+    if (strict) {
+        maybe_current_example_ = t.read<std::optional<data>>();
+
+        if (maybe_current_example_) {
+            // The assumption we make is that the recorded example will fully
+            // reconstruct the original yielded-from data pipeline.
+            data_pipeline_ = invoke_function(*maybe_current_example_);
+
+            // With that assumption, we restore the recorded state.
+            data_pipeline_.reload_position(t);
+        }
+        else
+            data_pipeline_ = {};
+    } else {
         data_pipeline_ = {};
 
-    inner_->reload_position(t);
+        maybe_current_example_ = std::nullopt;
+    }
+
+    inner_->reload_position(t, strict);
 }
 
-bool
-yield_from_data_source::is_infinite() const noexcept
+data_source_finitude_type
+yield_from_data_source::finitude_type() const noexcept
 {
-    return inner_->is_infinite();
+    return inner_->finitude_type();
 }
 
 bool
@@ -80,7 +88,7 @@ yield_from_data_source::load_next_data_pipeline()
     else
         data_pipeline_ = {};
 
-    if (data_pipeline_.is_infinite()) {
+    if (data_pipeline_.finitude_type() != data_source_finitude_type::finite) {
         data_pipeline_ = {};
 
         throw_data_pipeline_error(std::move(maybe_current_example_), /*recoverable=*/true,
@@ -93,14 +101,7 @@ yield_from_data_source::load_next_data_pipeline()
 data_pipeline
 yield_from_data_source::invoke_function(data &example)
 {
-    try {
-        return yield_fn_(example);
-    } catch (const data_pipeline_error &) {
-        throw;
-    } catch (const std::exception &) {
-        throw_data_pipeline_error_with_nested(std::move(example), /*recoverable=*/true,
-            "The yield operation has failed. See nested exception for details.");
-    }
+    return yield_fn_(example);
 }
 
 }  // namespace fairseq2n::detail

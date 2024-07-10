@@ -5,25 +5,41 @@
 # LICENSE file in the root directory of this source tree.
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Final, List, final
 
-from fairseq2.assets import AssetCard, default_asset_store, default_download_manager
-from fairseq2.data.text import StandardTextTokenizerLoader, load_text_tokenizer
-from fairseq2.models.s2t_transformer.builder import (
+from fairseq2.assets import AssetCard
+from fairseq2.data.text import AbstractTextTokenizerLoader, load_text_tokenizer
+from fairseq2.models.config_loader import StandardModelConfigLoader
+from fairseq2.models.loader import DenseModelLoader, load_model
+from fairseq2.models.s2t_transformer.archs import s2t_transformer_archs
+from fairseq2.models.s2t_transformer.factory import (
+    S2T_TRANSFORMER_FAMILY,
     S2TTransformerConfig,
     create_s2t_transformer_model,
-    s2t_transformer_archs,
 )
 from fairseq2.models.s2t_transformer.tokenizer import S2TTransformerTokenizer
-from fairseq2.models.transformer import TransformerModel
-from fairseq2.models.utils import ConfigLoader, ModelLoader
 from fairseq2.models.utils.checkpoint import convert_fairseq_checkpoint
+from fairseq2.typing import override
+
+load_s2t_transformer_config = StandardModelConfigLoader(
+    family=S2T_TRANSFORMER_FAMILY,
+    config_kls=S2TTransformerConfig,
+    arch_configs=s2t_transformer_archs,
+)
 
 
 def convert_s2t_transformer_checkpoint(
     checkpoint: Dict[str, Any], config: S2TTransformerConfig
 ) -> Dict[str, Any]:
-    """Convert a fairseq S2T Transformer checkpoint to fairseq2."""
+    """Convert a fairseq S2T Transformer checkpoint to fairseq2 format."""
+    try:
+        state_dict = checkpoint["model"]
+    except KeyError:
+        return checkpoint
+
+    if "decoder.output_projection.weight" not in state_dict:
+        return checkpoint
+
     key_map = {
         # fmt: off
         r"^encoder\.subsample\.conv_layers\.([0-9]+)\.":                   r"encoder_frontend.feature_extractor.layers.\1.conv.",
@@ -71,34 +87,35 @@ def convert_s2t_transformer_checkpoint(
     return convert_fairseq_checkpoint(checkpoint, key_map)
 
 
-def _create_s2t_transformer_tokenizer(
-    path: Path, card: AssetCard
-) -> S2TTransformerTokenizer:
-    task = card.field("task").as_one_of({"translation", "transcription"})
-
-    target_langs = card.field("target_langs").as_list(str)
-
-    return S2TTransformerTokenizer(
-        path, task, set(target_langs), default_target_lang=target_langs[0]
-    )
-
-
-load_s2t_transformer_config = ConfigLoader[S2TTransformerConfig](
-    default_asset_store, s2t_transformer_archs
-)
-
-load_s2t_transformer_model = ModelLoader[TransformerModel, S2TTransformerConfig](
-    default_asset_store,
-    default_download_manager,
-    load_s2t_transformer_config,
-    create_s2t_transformer_model,
-    convert_s2t_transformer_checkpoint,
-    mmap=True,
+load_s2t_transformer_model = DenseModelLoader(
+    config_loader=load_s2t_transformer_config,
+    factory=create_s2t_transformer_model,
+    checkpoint_converter=convert_s2t_transformer_checkpoint,
     restrict_checkpoints=False,
 )
 
-load_s2t_transformer_tokenizer = StandardTextTokenizerLoader[S2TTransformerTokenizer](
-    default_asset_store, default_download_manager, _create_s2t_transformer_tokenizer
-)
+load_model.register(S2T_TRANSFORMER_FAMILY, load_s2t_transformer_model)
 
-load_text_tokenizer.register_loader("s2t_transformer", load_s2t_transformer_tokenizer)
+
+@final
+class S2TTransformerTokenizerLoader(
+    AbstractTextTokenizerLoader[S2TTransformerTokenizer]
+):
+    """Loads S2T Transformer tokenizers."""
+
+    _VALID_TASKS: Final = {"translation", "transcription"}
+
+    @override
+    def _load(self, path: Path, card: AssetCard) -> S2TTransformerTokenizer:
+        task = card.field("task").as_one_of(self._VALID_TASKS)
+
+        target_langs = card.field("target_langs").as_(List[str])
+
+        return S2TTransformerTokenizer(
+            path, task, set(target_langs), default_target_lang=target_langs[0]
+        )
+
+
+load_s2t_transformer_tokenizer = S2TTransformerTokenizerLoader()
+
+load_text_tokenizer.register(S2T_TRANSFORMER_FAMILY, load_s2t_transformer_tokenizer)

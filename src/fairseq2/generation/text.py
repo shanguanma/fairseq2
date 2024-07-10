@@ -46,7 +46,7 @@ class SequenceToTextConverter:
         """
         self._generator = generator
 
-        device = infer_device(generator.model, param_name="generator.model")
+        device = infer_device(generator.model, name="generator.model")
 
         target_text_encoder = tokenizer.create_encoder(
             task=task, lang=target_lang, mode="target", device=device
@@ -153,6 +153,7 @@ class TextTranslator:
     _converter: SequenceToTextConverter
     _pad_idx: int
     _source_text_encoder: TextTokenEncoder
+    _max_source_len: Optional[int]
 
     def __init__(
         self,
@@ -160,6 +161,8 @@ class TextTranslator:
         tokenizer: TextTokenizer,
         source_lang: Optional[str] = None,
         target_lang: Optional[str] = None,
+        *,
+        max_source_len: Optional[int] = None,
     ) -> None:
         """
         :param generator:
@@ -170,6 +173,9 @@ class TextTranslator:
             The source language.
         :param target_lang:
             The target language.
+        :param max_source_len:
+            The maximum number of tokens above which the source sequence gets
+            truncated.
         """
         self._converter = SequenceToTextConverter(
             generator, tokenizer, "translation", target_lang
@@ -183,11 +189,18 @@ class TextTranslator:
 
         self._pad_idx = pad_idx
 
-        device = infer_device(generator.model, param_name="generator.model")
+        device = infer_device(generator.model, name="generator.model")
 
         self._source_text_encoder = tokenizer.create_encoder(
             task="translation", lang=source_lang, mode="source", device=device
         )
+
+        if max_source_len is not None and max_source_len <= 0:
+            raise ValueError(
+                f"`max_source_len` must be greater than or equal to 1, but is {max_source_len} instead."
+            )
+
+        self._max_source_len = max_source_len
 
     def __call__(self, source_text: str) -> Tuple[str, Seq2SeqGeneratorOutput]:
         """
@@ -199,6 +212,9 @@ class TextTranslator:
             - The output of the underlying sequence-to-sequence generator.
         """
         source_seq = self._source_text_encoder(source_text)
+
+        if self._max_source_len:
+            source_seq = source_seq[: self._max_source_len]
 
         return self._converter(source_seq)
 
@@ -219,6 +235,9 @@ class TextTranslator:
             )
 
         source_seq_list = [self._source_text_encoder(t) for t in source_texts]
+
+        if self._max_source_len:
+            source_seq_list = [seq[: self._max_source_len] for seq in source_seq_list]
 
         source_seqs, source_padding_mask = pad_seqs(source_seq_list, self._pad_idx)
 
@@ -242,7 +261,7 @@ class TextCompleter:
         """
         self._generator = generator
 
-        device = infer_device(generator.model, param_name="generator.model")
+        device = infer_device(generator.model, name="generator.model")
 
         self._text_encoder = tokenizer.create_encoder(mode="prompt", device=device)
         self._text_decoder = tokenizer.create_decoder()

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 version = "0.3.0.dev0"
 
@@ -38,17 +38,26 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     package_dir={"": "src"},
-    packages=find_packages(where="src"),
-    package_data={"fairseq2": ["py.typed", "assets/cards/*.yaml"]},
+    packages=find_namespace_packages(where="src"),
+    package_data={
+        "fairseq2": ["py.typed"],
+        "fairseq2.assets.cards": ["**/*.yaml"],
+    },
     zip_safe=False,
     python_requires=">=3.8",
     install_requires=[
+        "blobfile~=2.1",
+        "editdistance~=0.8",
         "fairseq2n" + fairseq2n_version_spec,
         "importlib_metadata~=7.0",
+        "importlib_resources~=6.4",
         "numpy~=1.23",
         "packaging~=23.1",
         "psutil~=5.9",
         "pyyaml~=6.0",
+        "rich~=13.7",
+        "sacrebleu~=2.4",
+        "tiktoken~=0.7",
         "torcheval~=0.0.6",
         "tqdm~=4.62",
         "typing_extensions~=4.3;python_version<'3.10'",
@@ -56,4 +65,5 @@ setup(
     extras_require={
         "arrow": ["pyarrow>=13.0.0", "pandas~=2.0.0"],
     },
+    entry_points={"console_scripts": ["fairseq2=fairseq2.recipes:main"]},
 )

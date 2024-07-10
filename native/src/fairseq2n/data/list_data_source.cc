@@ -20,27 +20,27 @@ list_data_source::next()
 }
 
 void
-list_data_source::reset()
+list_data_source::reset(bool)
 {
     pos_ = list_.begin();
 }
 
 void
-list_data_source::record_position(tape &t) const
+list_data_source::record_position(tape &t, bool) const
 {
     t.record(pos_ - list_.begin());
 }
 
 void
-list_data_source::reload_position(tape &t)
+list_data_source::reload_position(tape &t, bool)
 {
     pos_ = list_.begin() + t.read<std::ptrdiff_t>();
 }
 
-bool
-list_data_source::is_infinite() const noexcept
+data_source_finitude_type
+list_data_source::finitude_type() const noexcept
 {
-    return false;
+    return data_source_finitude_type::finite;
 }
 
 }

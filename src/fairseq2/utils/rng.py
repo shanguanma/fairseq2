@@ -6,12 +6,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, final
+from contextlib import contextmanager, nullcontext
+from typing import (
+    Any,
+    ContextManager,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    final,
+)
 
 import torch
 from torch import Generator, Tensor
 
-from fairseq2.typing import CPU, Device
+from fairseq2.typing import Device
 
 
 def use_deterministic(value: bool, warn_only: bool = False) -> None:
@@ -29,7 +40,7 @@ def use_deterministic(value: bool, warn_only: bool = False) -> None:
 
 
 @final
-class RNGBag:
+class RngBag:
     """Holds a collection of random number generators."""
 
     _generators: List[Generator]
@@ -42,20 +53,19 @@ class RNGBag:
         self._generators = list(generators)
 
     @staticmethod
-    def from_device_defaults(*devices: Device) -> RNGBag:
-        """Create an :class:`RNGBag` instance holding the default random number
-        generators of ``devices``."""
+    def from_device_defaults(*devices: Device) -> RngBag:
+        """Create an :class:`RngBag` from the random number generators of ``devices``."""
         unique_devices = set()
 
         generators = []
 
         for device in devices:
-            if device in unique_devices:
-                raise ValueError(f"`devices` already contains the device '{device}'.")
+            if device in unique_devices or device.type == "meta":
+                continue
 
             unique_devices.add(device)
 
-            if device == CPU:
+            if device.type == "cpu":
                 generators.append(torch.default_generator)
             elif device.type == "cuda":
                 # Ensure that the default CUDA generators are initialized.
@@ -68,10 +78,14 @@ class RNGBag:
                 generators.append(torch.cuda.default_generators[idx])
             else:
                 raise ValueError(
-                    f"`devices` must be of type 'cpu' or 'cuda', but at least one device is of type '{device.type}' instead."
+                    f"`devices` must be of type `cpu` or `cuda`, but at least one device is of type `{device.type}` instead."
                 )
 
-        return RNGBag(*generators)
+        return RngBag(*generators)
+
+    def add_generator(self, generator: Generator) -> None:
+        """Add ``generator`` to the bag."""
+        self._generators.append(generator)
 
     def seed(self) -> None:
         """Set the seed of the random number generators to a random number."""
@@ -95,6 +109,19 @@ class RNGBag:
         for g in self._generators:
             g.manual_seed(seed)
 
+    @contextmanager
+    def temporary_manual_seed(self, seed: int) -> Iterator[None]:
+        """Temporarily change the seed of the random number generators."""
+        original_states = [g.get_state() for g in self._generators]
+
+        self.manual_seed(seed)
+
+        try:
+            yield
+        finally:
+            for g, s in zip(self._generators, original_states):
+                g.set_state(s)
+
     def state_dict(self) -> Dict[str, Any]:
         return {"generators": [g.get_state() for g in self._generators]}
 
@@ -105,7 +132,7 @@ class RNGBag:
             raise ValueError("`state_dict` must contain an item named `generators`.")
 
         if not isinstance(states, list):
-            raise ValueError(
+            raise TypeError(
                 f"The `generators` item of `state_dict` must be of type `{list}`, but is of type `{type(states)}` instead."
             )
 
@@ -116,8 +143,30 @@ class RNGBag:
 
         for idx, state in enumerate(states):
             if not isinstance(state, Tensor):
-                raise ValueError(
+                raise TypeError(
                     f"The generator states in `state_dict` must be of type `{Tensor}`, but the element at index {idx} is of type `{type(state)}` instead."
                 )
 
             self._generators[idx].set_state(state.clone())
+
+
+def temporary_manual_seed(
+    devices: Iterable[Device], seed: Optional[int]
+) -> ContextManager[None]:
+    """Temporarily change the seed of the random number generators of ``devices``.
+
+    :param devices:
+        The devices whose random number generators will be updated.
+    :param seed:
+        The seed to set. If ``None``, becomes a no-op.
+    """
+    if seed is None:
+        return nullcontext()
+
+    rng_bag = RngBag.from_device_defaults(*devices)
+
+    return rng_bag.temporary_manual_seed(seed)
+
+
+# compat
+RNGBag = RngBag

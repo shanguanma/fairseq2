@@ -4,20 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from fairseq2.models.s2t_transformer.builder import (
-    S2TTransformerBuilder as S2TTransformerBuilder,
-)
-from fairseq2.models.s2t_transformer.builder import (
-    S2TTransformerConfig as S2TTransformerConfig,
-)
-from fairseq2.models.s2t_transformer.builder import (
-    create_s2t_transformer_model as create_s2t_transformer_model,
-)
-from fairseq2.models.s2t_transformer.builder import (
+from fairseq2.models.s2t_transformer.archs import (
     s2t_transformer_arch as s2t_transformer_arch,
 )
-from fairseq2.models.s2t_transformer.builder import (
+from fairseq2.models.s2t_transformer.archs import (
     s2t_transformer_archs as s2t_transformer_archs,
+)
+from fairseq2.models.s2t_transformer.factory import (
+    S2T_TRANSFORMER_FAMILY as S2T_TRANSFORMER_FAMILY,
+)
+from fairseq2.models.s2t_transformer.factory import (
+    S2TTransformerBuilder as S2TTransformerBuilder,
+)
+from fairseq2.models.s2t_transformer.factory import (
+    S2TTransformerConfig as S2TTransformerConfig,
+)
+from fairseq2.models.s2t_transformer.factory import (
+    create_s2t_transformer_model as create_s2t_transformer_model,
 )
 from fairseq2.models.s2t_transformer.feature_extractor import (
     Conv1dFbankSubsampler as Conv1dFbankSubsampler,
